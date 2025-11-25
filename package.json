@@ -1,0 +1,20 @@
+{
+  "name": "js-sagemaker-test",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@mastra/node-audio": "^0.1.7",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sagemaker-runtime-http2": "^3.940.0",
+    "@types/node": "^24.10.1"
+  }
+}
