@@ -245,16 +245,10 @@ async def invoke_endpoint_with_bidirectional_stream(encoding: str = 'mulaw') -> 
             output = await stream.await_output()
             output_stream = output[1]
             
-            # First, wait for send task to complete (or timeout)
-            print('Waiting for send task to complete...')
             try:
                 await asyncio.wait_for(send_task, timeout=60.0)
-                print('Send task completed')
             except asyncio.TimeoutError:
-                print('Warning: Send task timed out, continuing to receive responses')
-            
-            # Now receive all responses
-            # Wait for responses with timeout after send is done
+                pass
             timeout_seconds = 30
             start_time = time.time()
             consecutive_none_count = 0
@@ -262,73 +256,47 @@ async def invoke_endpoint_with_bidirectional_stream(encoding: str = 'mulaw') -> 
             last_chunk_time = time.time()
             
             while True:
-                # Check timeout - but only if we haven't received anything recently
                 elapsed = time.time() - start_time
                 time_since_last_chunk = time.time() - last_chunk_time
                 
-                # If send is done and we haven't received anything for 10 seconds, we're probably done
                 if send_task.done() and time_since_last_chunk > 10.0 and chunk_count > 0:
-                    print(f'No more responses (no chunks for {time_since_last_chunk:.1f}s after send complete)')
                     break
                 
-                # Overall timeout
                 if elapsed > timeout_seconds:
-                    print(f'Overall timeout ({timeout_seconds}s) waiting for responses')
                     break
                 
                 try:
-                    # Use asyncio.wait_for to add timeout to receive
                     result = await asyncio.wait_for(output_stream.receive(), timeout=5.0)
                 except asyncio.TimeoutError:
-                    # If send is done and we've received chunks, might be finished
                     if send_task.done() and chunk_count > 0:
-                        # Wait a bit more for any final chunks
                         await asyncio.sleep(2.0)
-                        # Try one more time
                         try:
                             result = await asyncio.wait_for(output_stream.receive(), timeout=1.0)
                         except asyncio.TimeoutError:
-                            print('No more responses (timeout after send complete)')
                             break
                     else:
                         continue
                 
                 if result is None:
-                    # None doesn't necessarily mean the stream is done
-                    # Continue trying to receive, but track consecutive None results
                     consecutive_none_count += 1
-                    print(f'Received None (count: {consecutive_none_count}), continuing to wait for more chunks...')
                     
-                    # Only break if we get many None results AND send is done AND we've waited
                     if consecutive_none_count >= max_consecutive_none and send_task.done():
-                        # Wait a bit more to see if more chunks arrive
                         await asyncio.sleep(2.0)
-                        # Try one more receive
                         try:
                             result = await asyncio.wait_for(output_stream.receive(), timeout=1.0)
                             if result is not None:
                                 consecutive_none_count = 0
-                                # Process this result in the next iteration
                                 continue
                         except asyncio.TimeoutError:
                             pass
-                        
-                        print(f'No more responses after {consecutive_none_count} None results (send complete)')
                         break
                     else:
-                        # Wait a bit and try again
                         await asyncio.sleep(0.5)
                         continue
                 
-                # Reset None counter when we get a valid result
                 consecutive_none_count = 0
                 chunk_count += 1
-                last_chunk_time = time.time()  # Update last chunk time
-                
-                # Debug: Print result type and attributes
-                result_type = type(result).__name__
-                attrs = [attr for attr in dir(result) if not attr.startswith('_')]
-                print(f'Processing chunk {chunk_count}, type: {result_type}, attributes: {attrs[:15]}')
+                last_chunk_time = time.time()
                 
                 # Check for stream errors first (similar to JavaScript)
                 if hasattr(result, 'internal_stream_failure') and result.internal_stream_failure:
@@ -339,101 +307,56 @@ async def invoke_endpoint_with_bidirectional_stream(encoding: str = 'mulaw') -> 
                     print(f'Model stream error: {result.model_stream_error}')
                     break
                 
-                # Extract audio data from PayloadPart (similar to JavaScript chunk.PayloadPart.Bytes)
                 audio_data = None
                 
-                # Check for payload_part attribute (similar to JavaScript chunk.PayloadPart)
                 if hasattr(result, 'payload_part') and result.payload_part:
                     payload_part = result.payload_part
-                    print(f'  Found payload_part: {type(payload_part).__name__}')
                     if hasattr(payload_part, 'bytes_'):
                         audio_data = payload_part.bytes_
-                        print(f'  Extracted audio from payload_part.bytes_: {len(audio_data) if audio_data else 0} bytes')
                     elif hasattr(payload_part, 'bytes'):
                         audio_data = payload_part.bytes
-                        print(f'  Extracted audio from payload_part.bytes: {len(audio_data) if audio_data else 0} bytes')
                 
-                # Fallback to checking value attribute
                 if not audio_data and hasattr(result, 'value') and result.value:
-                    print(f'  Checking result.value: {type(result.value).__name__}')
                     if hasattr(result.value, 'bytes_'):
                         audio_data = result.value.bytes_
-                        print(f'  Extracted audio from value.bytes_: {len(audio_data) if audio_data else 0} bytes')
                     elif hasattr(result.value, 'bytes'):
                         audio_data = result.value.bytes
-                        print(f'  Extracted audio from value.bytes: {len(audio_data) if audio_data else 0} bytes')
-                    # Also check if value has payload_part
                     elif hasattr(result.value, 'payload_part') and result.value.payload_part:
                         payload_part = result.value.payload_part
-                        print(f'  Found value.payload_part: {type(payload_part).__name__}')
                         if hasattr(payload_part, 'bytes_'):
                             audio_data = payload_part.bytes_
-                            print(f'  Extracted audio from value.payload_part.bytes_: {len(audio_data) if audio_data else 0} bytes')
                         elif hasattr(payload_part, 'bytes'):
                             audio_data = payload_part.bytes
-                            print(f'  Extracted audio from value.payload_part.bytes: {len(audio_data) if audio_data else 0} bytes')
                 
-                # Final fallback
                 if not audio_data:
                     if hasattr(result, 'bytes_'):
                         audio_data = result.bytes_
-                        print(f'  Extracted audio from result.bytes_: {len(audio_data) if audio_data else 0} bytes')
                     elif hasattr(result, 'bytes'):
                         audio_data = result.bytes
-                        print(f'  Extracted audio from result.bytes: {len(audio_data) if audio_data else 0} bytes')
                 
                 if audio_data:
-                    if len(audio_data) > 34:  # Skip small metadata messages
-                        # Check for odd-byte chunks that could cause static noise
-                        if encoding == 'linear16' and len(audio_data) % 2 != 0:
-                            print(f'⚠ Warning: Odd-byte chunk {chunk_count} ({len(audio_data)} bytes) - may cause static noise')
+                    is_metadata = audio_data.startswith(b'{"type":"Metadata"') or audio_data.startswith(b'{"type": "Metadata"')
+                    if not is_metadata:
                         audio_chunks.append(audio_data)
-                        print(f'✓ Received audio chunk {chunk_count}, size: {len(audio_data)} bytes')
-                    else:
-                        print(f'⊘ Skipping small chunk {chunk_count}, size: {len(audio_data)} bytes (likely metadata)')
-                else:
-                    # Log result structure for debugging
-                    print(f'✗ Chunk {chunk_count} has no audio data. Full attributes: {attrs}')
-                    # Try to print the actual result object
-                    try:
-                        print(f'  Result repr: {repr(result)[:200]}')
-                    except:
-                        pass
         except Exception as e:
             print(f'Error receiving responses: {e}')
             import traceback
             traceback.print_exc()
         
-        # Ensure send task is complete (should already be done, but just in case)
+        # Ensure send task is complete 
         if not send_task.done():
             await send_task
         
-        print(f'Received {chunk_count} chunks, {len(audio_chunks)} audio chunks')
-        
-        # Combine audio chunks and play
         response = {'Body': b''.join(audio_chunks) if audio_chunks else b''}
         response_body = response['Body']
         
-        print('Bidirectional stream response received. Processing...')
-        
         if len(response_body) > 0:
-            # Check for odd-byte buffer that could cause static noise
-            if encoding == 'linear16' and len(response_body) % 2 != 0:
-                print(f'⚠ Warning: Total buffer has odd number of bytes ({len(response_body)}) - this can cause static noise!')
-            
-            # Check if we have enough audio data
             if len(response_body) < 1000:
                 print(f'Warning: Very small audio buffer ({len(response_body)} bytes). Audio may be inaudible.')
             
-            if len(response_body) == 0:
-                print('No audio data to process')
-            else:
-                # Decode audio based on encoding format and play
-                print(f'Playing audio, size: {len(response_body)} bytes, encoding: {encoding}')
+            if len(response_body) > 0:
                 
-                # Check if data starts with RIFF (WAV header) or is raw encoded data
                 if response_body[:4] == b'RIFF':
-                    # It's a WAV file, read the header
                     wav_file = wave.open(io.BytesIO(response_body), 'rb')
                     sample_rate = wav_file.getframerate()
                     channels = wav_file.getnchannels()
@@ -441,20 +364,11 @@ async def invoke_endpoint_with_bidirectional_stream(encoding: str = 'mulaw') -> 
                     encoded_data = wav_file.readframes(num_frames)
                     wav_file.close()
                 else:
-                    # Raw encoded data (no WAV header)
                     encoded_data = response_body
-                    # Default sample rate (mulaw/alaw are typically 8000 Hz, linear16 is typically 24000 Hz)
                     sample_rate = 8000 if encoding in ['mulaw', 'alaw'] else 24000
                 
-                # Decode based on encoding format
                 if encoding == 'linear16':
-                    # Linear16 is already PCM, just use it directly
-                    # Ensure buffer size is a multiple of 2 bytes (16-bit samples)
-                    if len(encoded_data) % 2 != 0:
-                        print(f'Warning: Odd number of bytes ({len(encoded_data)}), truncating last byte')
-                        linear16_data = encoded_data[:-1]
-                    else:
-                        linear16_data = encoded_data
+                    linear16_data = encoded_data
                 elif encoding == 'mulaw':
                     # Decode mulaw to linear16 PCM
                     linear16_data = decode_mulaw(encoded_data)
@@ -464,32 +378,17 @@ async def invoke_endpoint_with_bidirectional_stream(encoding: str = 'mulaw') -> 
                 else:
                     raise ValueError(f'Unsupported encoding format: {encoding}')
                 
-                # Ensure linear16_data is a multiple of 2 bytes before converting
                 if len(linear16_data) % 2 != 0:
-                    print(f'Warning: Linear16 data has odd number of bytes ({len(linear16_data)}), truncating last byte')
                     linear16_data = linear16_data[:-1]
                 
                 # Convert to numpy array (16-bit samples)
                 audio_array = np.frombuffer(linear16_data, dtype=np.int16)
-                print(f'Audio array shape: {audio_array.shape}, samples: {len(audio_array)}')
-                
-                # Normalize to float32 range [-1.0, 1.0] for sounddevice
                 audio_float = audio_array.astype(np.float32) / 32768.0
-                
-                # Reshape for mono audio
                 if len(audio_float.shape) > 1:
                     audio_float = audio_float.flatten()
                 
-                # Play the audio
-                duration = len(audio_float) / sample_rate
-                print(f'Audio playback starting: {len(audio_float)} samples at {sample_rate} Hz (duration: {duration:.2f} seconds)')
                 sd.play(audio_float, samplerate=sample_rate)
-                sd.wait()  # Wait until audio playback is finished
-                print('Audio playback completed')
-        else:
-            print('No audio data received to process')
-        
-        print('Bidirectional endpoint invocation completed successfully')
+                sd.wait()
         return response
         
     except Exception as error:

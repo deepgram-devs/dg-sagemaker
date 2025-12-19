@@ -145,10 +145,12 @@ All dependencies are pure Python or have Python 3.13 compatible implementations.
 ## Technical Details
 
 - **Text Chunking**: Text is split into 20-word chunks and sent with flush messages to optimize streaming
+- **Metadata Handling**: The first chunk from SageMaker is a JSON metadata message that is automatically detected and skipped. Only audio chunks are processed.
 - **Audio Decoding**: 
   - Mulaw and A-law use ITU-T G.711 standard decoding algorithms
   - Pure Python implementation (no external dependencies)
   - Automatically handles WAV headers or raw encoded data
+  - Ensures proper byte alignment for linear16 encoding (16-bit samples)
 - **Sample Rates**:
   - linear16: Typically 24kHz
   - mulaw/alaw: Typically 8kHz
