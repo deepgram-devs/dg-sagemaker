@@ -9,10 +9,11 @@ from aws_sdk_sagemaker_runtime_http2.models import (
     RequestStreamEventPayloadPart,
     RequestPayloadPart
 )
-from tts import config, region, model_invocation_path, get_sagemaker_client
+from tts import config, region, model_invocation_path, get_sagemaker_client, decode_mulaw, decode_alaw
 import os
 import wave
 import io
+import argparse
 
 # All English Deepgram aura-2 voices
 english_aura2_voices = [
@@ -87,7 +88,6 @@ async def create_tts_request_events():
             print(f'Sending chunk {i + 1}/{len(chunks)}: "{preview}"')
 
         payload_bytes = json.dumps(tts_payload).encode('utf-8')
-        # Try adding data_type parameter to match JavaScript DataType: "UTF8"
         try:
             payload_part = RequestPayloadPart(bytes_=payload_bytes, data_type="UTF8")
         except TypeError:
@@ -124,13 +124,13 @@ async def sleep(ms: int) -> None:
 
 
 
-async def invoke_endpoint_with_voice(voice_id: str) -> Dict[str, Any]:
+async def invoke_endpoint_with_voice(voice_id: str, encoding: str = 'mulaw') -> Dict[str, Any]:
     """Invoke SageMaker endpoint with a specific voice using AWS SDK."""
     print(f"\n{'=' * 60}")
-    print(f"Testing voice: {voice_id}")
+    print(f"Testing voice: {voice_id} with encoding: {encoding}")
     print('=' * 60)
 
-    model_query_string = f'model={voice_id}&encoding=mulaw'
+    model_query_string = f'model={voice_id}&encoding={encoding}'
 
     try:
         print('Sending bidirectional stream request...')
@@ -307,6 +307,9 @@ async def invoke_endpoint_with_voice(voice_id: str) -> Dict[str, Any]:
                 
                 if audio_data:
                     if len(audio_data) > 34:  # Skip small metadata messages
+                        # Check for odd-byte chunks that could cause static noise
+                        if encoding == 'linear16' and len(audio_data) % 2 != 0:
+                            print(f'⚠ Warning: Odd-byte chunk {chunk_count} ({len(audio_data)} bytes) - may cause static noise')
                         audio_chunks.append(audio_data)
                         print(f'✓ Received audio chunk {chunk_count}, size: {len(audio_data)} bytes')
                     else:
@@ -335,6 +338,10 @@ async def invoke_endpoint_with_voice(voice_id: str) -> Dict[str, Any]:
             audio_buffer = b''.join(audio_chunks)
             print(f'Total audio buffer size: {len(audio_buffer)} bytes')
             
+            # Check for odd-byte buffer that could cause static noise
+            if encoding == 'linear16' and len(audio_buffer) % 2 != 0:
+                print(f'⚠ Warning: Total buffer has odd number of bytes ({len(audio_buffer)}) - this can cause static noise!')
+            
             # Check if we have enough audio data
             if len(audio_buffer) < 1000:
                 print(f'Warning: Very small audio buffer ({len(audio_buffer)} bytes). Audio may be inaudible.')
@@ -342,52 +349,49 @@ async def invoke_endpoint_with_voice(voice_id: str) -> Dict[str, Any]:
             if len(audio_buffer) == 0:
                 print('No audio data to play')
             else:
-                # Decode mulaw audio and play
-                # Check if data starts with RIFF (WAV header) or is raw mulaw
+                # Decode audio based on encoding format and play
+                print(f'Decoding audio with encoding: {encoding}')
+                
+                # Check if data starts with RIFF (WAV header) or is raw encoded data
                 if audio_buffer[:4] == b'RIFF':
                     # It's a WAV file, read the header
                     wav_file = wave.open(io.BytesIO(audio_buffer), 'rb')
                     sample_rate = wav_file.getframerate()
                     channels = wav_file.getnchannels()
                     num_frames = wav_file.getnframes()
-                    mulaw_data = wav_file.readframes(num_frames)
+                    encoded_data = wav_file.readframes(num_frames)
                     wav_file.close()
                 else:
-                    # Raw mulaw data (no WAV header)
-                    mulaw_data = audio_buffer
-                    # Mulaw is typically 8000 Hz, mono
-                    sample_rate = 8000
+                    # Raw encoded data (no WAV header)
+                    encoded_data = audio_buffer
+                    # Default sample rate (mulaw/alaw are typically 8000 Hz, linear16 is typically 24000 Hz)
+                    sample_rate = 8000 if encoding in ['mulaw', 'alaw'] else 24000
                 
-                # Decode mulaw to linear16 PCM using ITU-T G.711 standard
-                # Mulaw decoding: convert 8-bit mulaw to 16-bit linear PCM
-                linear16_data = bytearray(len(mulaw_data) * 2)
+                # Decode based on encoding format
+                if encoding == 'linear16':
+                    # Linear16 is already PCM, just use it directly
+                    # Ensure buffer size is a multiple of 2 bytes (16-bit samples)
+                    if len(encoded_data) % 2 != 0:
+                        print(f'Warning: Odd number of bytes ({len(encoded_data)}), truncating last byte')
+                        linear16_data = encoded_data[:-1]
+                    else:
+                        linear16_data = encoded_data
+                elif encoding == 'mulaw':
+                    # Decode mulaw to linear16 PCM
+                    linear16_data = decode_mulaw(encoded_data)
+                elif encoding == 'alaw':
+                    # Decode A-law to linear16 PCM
+                    linear16_data = decode_alaw(encoded_data)
+                else:
+                    raise ValueError(f'Unsupported encoding format: {encoding}')
                 
-                for i, mulaw_byte in enumerate(mulaw_data):
-                    # Invert all bits (mulaw uses inverted encoding)
-                    mulaw_byte = mulaw_byte ^ 0xFF
-                    
-                    # Extract sign, exponent, and mantissa
-                    sign = (mulaw_byte & 0x80) >> 7
-                    exponent = (mulaw_byte & 0x70) >> 4
-                    mantissa = mulaw_byte & 0x0F
-                    
-                    # ITU-T G.711 mulaw decoding formula
-                    # linear = sign * ((33 + 2*mantissa) * 2^(exponent+2) - 33)
-                    linear = ((33 + 2 * mantissa) * (1 << (exponent + 2))) - 33
-                    
-                    # Apply sign
-                    if sign == 1:
-                        linear = -linear
-                    
-                    # Clamp to 16-bit signed integer range
-                    linear = max(-32768, min(32767, linear))
-                    
-                    # Convert to 16-bit signed integer (little-endian)
-                    linear16_data[i * 2] = linear & 0xFF
-                    linear16_data[i * 2 + 1] = (linear >> 8) & 0xFF
+                # Ensure linear16_data is a multiple of 2 bytes before converting
+                if len(linear16_data) % 2 != 0:
+                    print(f'Warning: Linear16 data has odd number of bytes ({len(linear16_data)}), truncating last byte')
+                    linear16_data = linear16_data[:-1]
                 
                 # Convert to numpy array (16-bit samples)
-                audio_array = np.frombuffer(bytes(linear16_data), dtype=np.int16)
+                audio_array = np.frombuffer(linear16_data, dtype=np.int16)
                 print(f'Audio array shape: {audio_array.shape}, samples: {len(audio_array)}')
                 
                 # Normalize to float32 range [-1.0, 1.0] for sounddevice
@@ -419,15 +423,15 @@ async def invoke_endpoint_with_voice(voice_id: str) -> Dict[str, Any]:
         raise error
 
 
-async def test_all_voices() -> None:
+async def test_all_voices(encoding: str = 'mulaw') -> None:
     """Test all available Deepgram aura-2 English voices."""
-    print(f'Starting test of {len(english_aura2_voices)} Deepgram aura-2 English voices...\n')
+    print(f'Starting test of {len(english_aura2_voices)} Deepgram aura-2 English voices with encoding: {encoding}...\n')
 
     results: List[Dict[str, Any]] = []
 
     for voice in english_aura2_voices:
         try:
-            await invoke_endpoint_with_voice(voice)
+            await invoke_endpoint_with_voice(voice, encoding=encoding)
             results.append({'voice': voice, 'success': True})
             print(f'✓ {voice} - Success\n')
         except Exception as error:
@@ -458,10 +462,10 @@ async def test_all_voices() -> None:
 
 
 # Main execution
-async def main() -> None:
+async def main(encoding: str = 'mulaw') -> None:
     """Main execution function."""
     try:
-        await test_all_voices()
+        await test_all_voices(encoding=encoding)
         print('\nAll voice tests completed!')
     except Exception as error:
         print(f'Voice testing process failed: {error}')
@@ -470,8 +474,18 @@ async def main() -> None:
 
 # Run the script if this file is executed directly
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Test all Deepgram TTS voices via SageMaker')
+    parser.add_argument(
+        '--encoding',
+        type=str,
+        choices=['linear16', 'mulaw', 'alaw'],
+        default='mulaw',
+        help='Audio encoding format: linear16, mulaw, or alaw (default: mulaw)'
+    )
+    args = parser.parse_args()
+    
     try:
-        asyncio.run(main())
+        asyncio.run(main(encoding=args.encoding))
     except Exception as error:
         print(f'Script execution failed: {error}')
         exit(1)

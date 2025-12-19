@@ -18,13 +18,13 @@ from smithy_aws_core.identity import EnvironmentCredentialsResolver
 import os
 import wave
 import io
+import argparse
 
 # Configuration
 region: str = "us-east-2"  # CHANGE ME: Specify the region where your SageMaker Endpoint is deployed.
 bidi_endpoint: str = f"https://runtime.sagemaker.{region}.amazonaws.com:8443"  # CHANGE ME: This must correspond to the AWS region where your Endpoint is deployed.
 model_invocation_path = 'v1/speak'  # The internal WebSocket API route you want to access, used by Deepgram specifically.
 # model_invocation_path = '/invocations-bidirectional'  # Alternative path
-model_query_string = 'model=aura-2-andromeda-en&encoding=mulaw'  # CHANGE ME: Update this to the model parameters you want.
 
 input_text = """
 The morning sun, filtered through the rustling leaves of the Sector 5 Slums. The beautiful trees swayed in the wind while Aeris watched them.
@@ -71,6 +71,72 @@ def get_sagemaker_client() -> SageMakerRuntimeHTTP2Client:
         auth_schemes={"aws.auth#sigv4": SigV4AuthScheme(service="sagemaker")}
     )
     return SageMakerRuntimeHTTP2Client(config=config)
+
+
+def decode_mulaw(mulaw_data: bytes) -> bytes:
+    """Decode mulaw-encoded audio to linear16 PCM using ITU-T G.711 standard."""
+    linear16_data = bytearray(len(mulaw_data) * 2)
+    
+    for i, mulaw_byte in enumerate(mulaw_data):
+        # Invert all bits (mulaw uses inverted encoding)
+        mulaw_byte = mulaw_byte ^ 0xFF
+        
+        # Extract sign, exponent, and mantissa
+        sign = (mulaw_byte & 0x80) >> 7
+        exponent = (mulaw_byte & 0x70) >> 4
+        mantissa = mulaw_byte & 0x0F
+        
+        # ITU-T G.711 mulaw decoding formula
+        # linear = sign * ((33 + 2*mantissa) * 2^(exponent+2) - 33)
+        linear = ((33 + 2 * mantissa) * (1 << (exponent + 2))) - 33
+        
+        # Apply sign
+        if sign == 1:
+            linear = -linear
+        
+        # Clamp to 16-bit signed integer range
+        linear = max(-32768, min(32767, linear))
+        
+        # Convert to 16-bit signed integer (little-endian)
+        linear16_data[i * 2] = linear & 0xFF
+        linear16_data[i * 2 + 1] = (linear >> 8) & 0xFF
+    
+    return bytes(linear16_data)
+
+
+def decode_alaw(alaw_data: bytes) -> bytes:
+    """Decode A-law encoded audio to linear16 PCM using ITU-T G.711 standard."""
+    linear16_data = bytearray(len(alaw_data) * 2)
+    
+    for i, alaw_byte in enumerate(alaw_data):
+        # Invert even bits (A-law uses inverted encoding on even bits)
+        alaw_byte = alaw_byte ^ 0x55
+        
+        # Extract sign, exponent, and mantissa
+        sign = (alaw_byte & 0x80) >> 7
+        exponent = (alaw_byte & 0x70) >> 4
+        mantissa = alaw_byte & 0x0F
+        
+        # ITU-T G.711 A-law decoding formula
+        if exponent == 0:
+            # Special case for exponent 0
+            linear = 2 * mantissa + 33
+        else:
+            # Standard case
+            linear = ((2 * mantissa + 33) * (1 << (exponent + 1))) - 33
+        
+        # Apply sign
+        if sign == 1:
+            linear = -linear
+        
+        # Clamp to 16-bit signed integer range
+        linear = max(-32768, min(32767, linear))
+        
+        # Convert to 16-bit signed integer (little-endian)
+        linear16_data[i * 2] = linear & 0xFF
+        linear16_data[i * 2 + 1] = (linear >> 8) & 0xFF
+    
+    return bytes(linear16_data)
 
 
 async def sleep(ms: int) -> None:
@@ -135,7 +201,7 @@ async def create_tts_request_events():
     await sleep(5000)
 
 
-async def invoke_endpoint_with_bidirectional_stream() -> Dict[str, Any]:
+async def invoke_endpoint_with_bidirectional_stream(encoding: str = 'mulaw') -> Dict[str, Any]:
     """Invoke SageMaker endpoint with bidirectional streaming using AWS SDK."""
     print('Invoking endpoint with bidirectional stream...')
     
@@ -145,6 +211,9 @@ async def invoke_endpoint_with_bidirectional_stream() -> Dict[str, Any]:
         
         # Get the SageMaker client
         client = get_sagemaker_client()
+        
+        # Build query string with encoding parameter
+        model_query_string = f'model=aura-2-andromeda-en&encoding={encoding}'
         
         # Create the input with model invocation path and query string
         input_params = InvokeEndpointWithBidirectionalStreamInput(
@@ -315,6 +384,9 @@ async def invoke_endpoint_with_bidirectional_stream() -> Dict[str, Any]:
                 
                 if audio_data:
                     if len(audio_data) > 34:  # Skip small metadata messages
+                        # Check for odd-byte chunks that could cause static noise
+                        if encoding == 'linear16' and len(audio_data) % 2 != 0:
+                            print(f'⚠ Warning: Odd-byte chunk {chunk_count} ({len(audio_data)} bytes) - may cause static noise')
                         audio_chunks.append(audio_data)
                         print(f'✓ Received audio chunk {chunk_count}, size: {len(audio_data)} bytes')
                     else:
@@ -345,6 +417,10 @@ async def invoke_endpoint_with_bidirectional_stream() -> Dict[str, Any]:
         print('Bidirectional stream response received. Processing...')
         
         if len(response_body) > 0:
+            # Check for odd-byte buffer that could cause static noise
+            if encoding == 'linear16' and len(response_body) % 2 != 0:
+                print(f'⚠ Warning: Total buffer has odd number of bytes ({len(response_body)}) - this can cause static noise!')
+            
             # Check if we have enough audio data
             if len(response_body) < 1000:
                 print(f'Warning: Very small audio buffer ({len(response_body)} bytes). Audio may be inaudible.')
@@ -352,54 +428,49 @@ async def invoke_endpoint_with_bidirectional_stream() -> Dict[str, Any]:
             if len(response_body) == 0:
                 print('No audio data to process')
             else:
-                # Decode mulaw audio and play
-                print(f'Playing audio, size: {len(response_body)} bytes')
+                # Decode audio based on encoding format and play
+                print(f'Playing audio, size: {len(response_body)} bytes, encoding: {encoding}')
                 
-                # Check if data starts with RIFF (WAV header) or is raw mulaw
+                # Check if data starts with RIFF (WAV header) or is raw encoded data
                 if response_body[:4] == b'RIFF':
                     # It's a WAV file, read the header
                     wav_file = wave.open(io.BytesIO(response_body), 'rb')
                     sample_rate = wav_file.getframerate()
                     channels = wav_file.getnchannels()
                     num_frames = wav_file.getnframes()
-                    mulaw_data = wav_file.readframes(num_frames)
+                    encoded_data = wav_file.readframes(num_frames)
                     wav_file.close()
                 else:
-                    # Raw mulaw data (no WAV header)
-                    mulaw_data = response_body
-                    # Mulaw is typically 8000 Hz, mono
-                    sample_rate = 8000
+                    # Raw encoded data (no WAV header)
+                    encoded_data = response_body
+                    # Default sample rate (mulaw/alaw are typically 8000 Hz, linear16 is typically 24000 Hz)
+                    sample_rate = 8000 if encoding in ['mulaw', 'alaw'] else 24000
                 
-                # Decode mulaw to linear16 PCM using ITU-T G.711 standard
-                # Mulaw decoding: convert 8-bit mulaw to 16-bit linear PCM
-                linear16_data = bytearray(len(mulaw_data) * 2)
+                # Decode based on encoding format
+                if encoding == 'linear16':
+                    # Linear16 is already PCM, just use it directly
+                    # Ensure buffer size is a multiple of 2 bytes (16-bit samples)
+                    if len(encoded_data) % 2 != 0:
+                        print(f'Warning: Odd number of bytes ({len(encoded_data)}), truncating last byte')
+                        linear16_data = encoded_data[:-1]
+                    else:
+                        linear16_data = encoded_data
+                elif encoding == 'mulaw':
+                    # Decode mulaw to linear16 PCM
+                    linear16_data = decode_mulaw(encoded_data)
+                elif encoding == 'alaw':
+                    # Decode A-law to linear16 PCM
+                    linear16_data = decode_alaw(encoded_data)
+                else:
+                    raise ValueError(f'Unsupported encoding format: {encoding}')
                 
-                for i, mulaw_byte in enumerate(mulaw_data):
-                    # Invert all bits (mulaw uses inverted encoding)
-                    mulaw_byte = mulaw_byte ^ 0xFF
-                    
-                    # Extract sign, exponent, and mantissa
-                    sign = (mulaw_byte & 0x80) >> 7
-                    exponent = (mulaw_byte & 0x70) >> 4
-                    mantissa = mulaw_byte & 0x0F
-                    
-                    # ITU-T G.711 mulaw decoding formula
-                    # linear = sign * ((33 + 2*mantissa) * 2^(exponent+2) - 33)
-                    linear = ((33 + 2 * mantissa) * (1 << (exponent + 2))) - 33
-                    
-                    # Apply sign
-                    if sign == 1:
-                        linear = -linear
-                    
-                    # Clamp to 16-bit signed integer range
-                    linear = max(-32768, min(32767, linear))
-                    
-                    # Convert to 16-bit signed integer (little-endian)
-                    linear16_data[i * 2] = linear & 0xFF
-                    linear16_data[i * 2 + 1] = (linear >> 8) & 0xFF
+                # Ensure linear16_data is a multiple of 2 bytes before converting
+                if len(linear16_data) % 2 != 0:
+                    print(f'Warning: Linear16 data has odd number of bytes ({len(linear16_data)}), truncating last byte')
+                    linear16_data = linear16_data[:-1]
                 
                 # Convert to numpy array (16-bit samples)
-                audio_array = np.frombuffer(bytes(linear16_data), dtype=np.int16)
+                audio_array = np.frombuffer(linear16_data, dtype=np.int16)
                 print(f'Audio array shape: {audio_array.shape}, samples: {len(audio_array)}')
                 
                 # Normalize to float32 range [-1.0, 1.0] for sounddevice
@@ -429,12 +500,12 @@ async def invoke_endpoint_with_bidirectional_stream() -> Dict[str, Any]:
 
 
 # Main execution function
-async def main() -> None:
+async def main(encoding: str = 'mulaw') -> None:
     """Main execution function."""
     try:
-        print('Starting SageMaker deployment process...')
+        print(f'Starting SageMaker deployment process with encoding: {encoding}...')
         
-        await invoke_endpoint_with_bidirectional_stream()
+        await invoke_endpoint_with_bidirectional_stream(encoding=encoding)
         
         print('All operations completed successfully!')
     
@@ -445,8 +516,18 @@ async def main() -> None:
 
 # Run the script if this file is executed directly
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Deepgram TTS via SageMaker')
+    parser.add_argument(
+        '--encoding',
+        type=str,
+        choices=['linear16', 'mulaw', 'alaw'],
+        default='mulaw',
+        help='Audio encoding format: linear16, mulaw, or alaw (default: mulaw)'
+    )
+    args = parser.parse_args()
+    
     try:
-        asyncio.run(main())
+        asyncio.run(main(encoding=args.encoding))
     except Exception as error:
         print(f'Script execution failed: {error}')
         exit(1)
