@@ -1,0 +1,14 @@
+[project]
+name = "python-stt"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aws-sdk-sagemaker-runtime-http2",
+    "boto3>=1.42.25",
+    "pyaudio>=0.2.14",
+]
+
+[tool.uv.sources]
+aws-sdk-sagemaker-runtime-http2 = { git = "https://github.com/awslabs/aws-sdk-python", subdirectory = "clients/aws-sdk-sagemaker-runtime-http2" }
