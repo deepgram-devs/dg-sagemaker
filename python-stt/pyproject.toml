@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aws-sdk-sagemaker-runtime-http2",
-    "boto3>=1.42.25",
+    "boto3>=1.42.34",
     "pyaudio>=0.2.14",
 ]
 
