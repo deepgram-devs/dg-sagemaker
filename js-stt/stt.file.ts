@@ -17,14 +17,14 @@ interface Config {
 }
 
 // Configuration
-const region: string = "us-west-2"; // CHANGE ME: Specify the region where your SageMake Endpoint is deployed.
+const region: string = "us-east-2"; // CHANGE ME: Specify the region where your SageMake Endpoint is deployed.
 const bidiEndpoint: string = `https://runtime.sagemaker.${region}.amazonaws.com:8443`; // CHANGE ME: This must correspond to the AWS region where your Endpoint is deployed.
 const inputFilePath = `/Users/trev/2025-12-15-aeris-story.wav`; // CHANGE ME: The local filesystem path to the audio file you want to transcribe.
 const modelInvocationPath = 'v1/listen'; // The internal WebSocket API route you want to access, used by Deepgram specifically.
-const modelQueryString = 'model=nova-3&diarize=true&language=multi'; // CHANGE ME: Update this to the model parameters you want. Preview only supports nova-3, entity detection, and diarization.
+const modelQueryString = 'model=nova-3&smart_format=true&diarize=true&language=multi&keyterm=Aeris&keyterm=Midgar&keyterm=Zolom&keyterm=Cetra'; // CHANGE ME: Update this to the model parameters you want. Preview only supports nova-3, entity detection, and diarization.
 
 const config: Config = {
-    endpointName: `2026-01-07-trevor-auto-scaling-test`, // CHANGE ME: Update this value to the name of the SageMaker Endpoint you deploy
+    endpointName: `2026-01-20-trevor-sullivan-stt-streaming-ner-test`, // CHANGE ME: Update this value to the name of the SageMaker Endpoint you deploy
 };
 
 const sagemakerRuntimeClientForBidi = new SageMakerRuntimeHTTP2Client({
@@ -36,7 +36,7 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms)).th
 
 // Create an async iterable for streaming WAV file chunks from the local filesystem
 async function* createWavFileRequestStream(wavFilePath: string, chunkSize: number = 1024*1024) { // Default 1MB chunks
-    const KEEPALIVE_INTERVAL = 3000; // 3 seconds
+    const KEEPALIVE_INTERVAL = 6000; // 3 seconds
     let lastKeepaliveTime = Date.now();
     
     // Resolve the full path to the WAV file
@@ -132,6 +132,7 @@ async function* createWavFileRequestStream(wavFilePath: string, chunkSize: numbe
         }
 
         // Close the connection after receiving all the response messages
+        console.log('Sending WebSocket close stream message');
         yield {
             PayloadPart: {
                 Bytes: new TextEncoder().encode(JSON.stringify({
