@@ -15,6 +15,7 @@ import os
 import signal
 import sys
 from queue import Queue
+from urllib.parse import quote
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError
 from aws_sdk_sagemaker_runtime_http2.client import SageMakerRuntimeHTTP2Client
@@ -71,6 +72,9 @@ class DeepgramSageMakerConnection:
             language: Language code (default: en)
             **kwargs: Additional Deepgram query parameters (diarize, punctuate, etc.)
         """
+        # Extract keywords list if provided
+        keywords_list = kwargs.pop('keywords', [])
+
         # Build query string for Deepgram parameters
         query_params = {
             "model": model,
@@ -82,6 +86,11 @@ class DeepgramSageMakerConnection:
 
         # Convert dict to query string
         query_string = "&".join(f"{k}={v}" for k, v in query_params.items())
+
+        # Add keywords parameters (multiple values with same key)
+        if keywords_list:
+            keywords_params = "&".join(f"keywords={quote(kw)}" for kw in keywords_list)
+            query_string = f"{query_string}&{keywords_params}"
 
         logger.debug(f"[Connection {self.connection_id}] Starting session with endpoint: {self.endpoint_name}")
         logger.debug(f"[Connection {self.connection_id}] Deepgram parameters: {query_string}")
@@ -502,8 +511,21 @@ async def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Set logging level (default: INFO)"
     )
+    parser.add_argument(
+        "--keywords",
+        default="",
+        help="Comma-delimited keywords in format 'keyword:intensity' (e.g., 'hello:5,world:10')"
+    )
 
     args = parser.parse_args()
+
+    # Parse keywords parameter
+    keywords_list = []
+    if args.keywords:
+        for keyword_item in args.keywords.split(','):
+            keyword_item = keyword_item.strip()
+            if keyword_item:
+                keywords_list.append(keyword_item)
 
     # Validate connections parameter
     if args.connections < 1:
@@ -549,7 +571,8 @@ async def main():
             model=args.model,
             language=args.language,
             diarize=args.diarize,
-            punctuate=args.punctuate
+            punctuate=args.punctuate,
+            keywords=keywords_list
         )
 
         print("\n" + "="*60)
