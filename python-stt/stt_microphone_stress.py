@@ -516,6 +516,18 @@ async def main():
         default="",
         help="Comma-delimited keywords in format 'keyword:intensity' (e.g., 'hello:5,world:10')"
     )
+    parser.add_argument(
+        "--interim-results",
+        default="true",
+        choices=["true", "false"],
+        help="Enable or disable interim results (default: true)"
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        help="Duration in seconds to run before stopping automatically (default: run until Ctrl+C)"
+    )
 
     args = parser.parse_args()
 
@@ -547,6 +559,8 @@ async def main():
     print(f"Model: {args.model}")
     print(f"Language: {args.language}")
     print(f"Region: {args.region}")
+    print(f"Interim Results: {args.interim_results}")
+    print(f"Duration: {args.duration}s" if args.duration else "Duration: until Ctrl+C")
     print(f"Sample Rate: {SAMPLE_RATE} Hz")
     print(f"Channels: {CHANNELS} (Mono)")
     print("=" * 60)
@@ -572,19 +586,30 @@ async def main():
             language=args.language,
             diarize=args.diarize,
             punctuate=args.punctuate,
+            interim_results=args.interim_results,
             keywords=keywords_list
         )
 
         print("\n" + "="*60)
         print(f"🎤 LIVE TRANSCRIPTION - {args.connections} Connection(s)")
-        print("   (Press Ctrl+C to stop)")
+        if args.duration:
+            print(f"   (Running for {args.duration}s, or press Ctrl+C to stop early)")
+        else:
+            print("   (Press Ctrl+C to stop)")
         print("="*60 + "\n")
 
         # Start microphone capture
         await client.start_microphone()
 
-        # Stream microphone audio until interrupted
-        await client.stream_microphone_audio()
+        # Stream microphone audio until interrupted or duration elapsed
+        if args.duration:
+            try:
+                await asyncio.wait_for(client.stream_microphone_audio(), timeout=args.duration)
+            except asyncio.TimeoutError:
+                print(f"\nDuration of {args.duration}s reached, stopping...")
+                client.is_active = False
+        else:
+            await client.stream_microphone_audio()
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user")

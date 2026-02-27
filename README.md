@@ -56,6 +56,18 @@ Keywords are only conmpatible with `nova-2`. For `nova-3` use keyterms instead.
 uv run python-stt/stt_microphone_stress.py your-endpoint-name --keywords "Deepgram:5,SageMaker:10,transcription:3"
 ```
 
+**Run for a fixed duration (useful for automated tests):**
+
+```bash
+uv run python-stt/stt_microphone_stress.py your-endpoint-name --duration 30
+```
+
+**Timed load test with multiple connections:**
+
+```bash
+uv run python-stt/stt_microphone_stress.py your-endpoint-name --connections 5 --duration 120
+```
+
 **Full example with all options:**
 
 ```bash
@@ -66,6 +78,7 @@ uv run python-stt/stt_microphone_stress.py your-endpoint-name \
   --diarize true \
   --punctuate true \
   --keywords "hello:5,world:10" \
+  --duration 60 \
   --region us-east-1 \
   --log-level DEBUG
 ```
@@ -78,6 +91,7 @@ uv run python-stt/stt_microphone_stress.py your-endpoint-name \
 - `--diarize true|false` - Enable speaker diarization (default: false)
 - `--punctuate true|false` - Enable punctuation (default: true)
 - `--keywords KEYWORDS` - Comma-delimited keywords with intensity (format: "word:intensity,word:intensity")
+- `--duration SECONDS` - Stop automatically after this many seconds (default: run until Ctrl+C)
 - `--region REGION` - AWS region (default: us-east-1)
 - `--log-level LEVEL` - Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)
 
