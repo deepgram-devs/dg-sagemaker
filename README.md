@@ -95,6 +95,101 @@ uv run python-stt/stt_microphone_stress.py your-endpoint-name \
 - `--region REGION` - AWS region (default: us-east-1)
 - `--log-level LEVEL` - Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)
 
+#### Python WAV File Stress Test Examples
+
+The `stt_wav_stress.py` script streams a WAV audio file to Deepgram on SageMaker in real-time, paced to match the file's actual sample rate. This makes it behave like a live microphone source, enabling repeatable and automated load testing without requiring a physical microphone.
+
+> **Requirements:** The WAV file must be 16-bit PCM (linear16). To convert any audio file, use `ffmpeg`:
+> ```bash
+> ffmpeg -i input.mp3 -ar 16000 -ac 1 -sample_fmt s16 output.wav
+> ```
+
+**Basic usage (single connection, play file once):**
+
+```bash
+uv run python-stt/stt_wav_stress.py your-endpoint-name --file audio.wav
+```
+
+**With a specific AWS region:**
+
+```bash
+uv run python-stt/stt_wav_stress.py your-endpoint-name --file audio.wav --region us-west-2
+```
+
+**Multiple simultaneous connections (load testing):**
+
+```bash
+uv run python-stt/stt_wav_stress.py your-endpoint-name --file audio.wav --connections 5
+```
+
+**Loop the file continuously until Ctrl+C:**
+
+```bash
+uv run python-stt/stt_wav_stress.py your-endpoint-name --file audio.wav --loop
+```
+
+**Loop for a fixed duration (useful for automated tests):**
+
+```bash
+uv run python-stt/stt_wav_stress.py your-endpoint-name --file audio.wav --loop --duration 120
+```
+
+**Timed load test with multiple connections:**
+
+```bash
+uv run python-stt/stt_wav_stress.py your-endpoint-name --file audio.wav --connections 10 --loop --duration 300
+```
+
+**With speaker diarization:**
+
+```bash
+uv run python-stt/stt_wav_stress.py your-endpoint-name --file audio.wav --diarize true
+```
+
+**With a different model and language:**
+
+```bash
+uv run python-stt/stt_wav_stress.py your-endpoint-name --file audio.wav --model nova-2 --language es
+```
+
+**With keywords boosting:**
+
+Keywords are only compatible with `nova-2`. For `nova-3` use keyterms instead.
+
+```bash
+uv run python-stt/stt_wav_stress.py your-endpoint-name --file audio.wav --keywords "Deepgram:5,SageMaker:10"
+```
+
+**Full example with all options:**
+
+```bash
+uv run python-stt/stt_wav_stress.py your-endpoint-name --file audio.wav \
+  --connections 3 \
+  --model nova-2 \
+  --language en \
+  --diarize true \
+  --punctuate true \
+  --keywords "hello:5,world:10" \
+  --loop \
+  --duration 60 \
+  --region us-east-1 \
+  --log-level DEBUG
+```
+
+**Available options:**
+
+- `--file WAV_FILE` - Path to the WAV file to stream (required, must be 16-bit PCM)
+- `--connections N` - Number of simultaneous streaming connections (default: 1)
+- `--model MODEL` - Deepgram model to use (default: nova-3)
+- `--language LANG` - Language code (default: en)
+- `--diarize true|false` - Enable speaker diarization (default: false)
+- `--punctuate true|false` - Enable punctuation (default: true)
+- `--keywords KEYWORDS` - Comma-delimited keywords with intensity (format: "word:intensity,word:intensity")
+- `--loop` - Loop the WAV file continuously until `--duration` is reached or Ctrl+C
+- `--duration SECONDS` - Stop automatically after this many seconds (default: play file once, or loop until Ctrl+C)
+- `--region REGION` - AWS region (default: us-east-1)
+- `--log-level LEVEL` - Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)
+
 
 ## Test Deepgram Text-to-Speech (TTS) on SageMaker
 
