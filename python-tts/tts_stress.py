@@ -20,7 +20,7 @@ import sys
 import time
 from queue import Queue
 import boto3
-from botocore.exceptions import NoCredentialsError, PartialCredentialsError
+from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
 from aws_sdk_sagemaker_runtime_http2.client import SageMakerRuntimeHTTP2Client
 from aws_sdk_sagemaker_runtime_http2.config import Config, HTTPAuthSchemeResolver
 from aws_sdk_sagemaker_runtime_http2.models import (
@@ -44,15 +44,6 @@ DEFAULT_REGION = "us-east-2"
 AUDIO_FORMAT = pyaudio.paInt16  # 16-bit PCM
 CHANNELS = 1  # Mono audio
 SAMPLE_RATE = 24000  # 24kHz sample rate (typical for TTS)
-
-# Test corpus - a few words to stream repeatedly
-TEST_PHRASES = [
-    "Hello world",
-    "Testing text to speech",
-    "Streaming audio data",
-    "Multiple connections",
-    "SageMaker Deepgram integration",
-]
 
 logger = logging.getLogger(__name__)
 
@@ -284,36 +275,47 @@ class DeepgramSageMakerTTSConnection:
         except Exception as e:
             logger.error(f"[Connection {self.connection_id}] Error processing audio responses: {e}", exc_info=True)
 
-    async def end_session(self):
-        """Close the streaming session"""
-        if not self.is_active:
-            return
+    async def end_session(self, force=False):
+        """Close the streaming session
 
-        logger.debug(f"[Connection {self.connection_id}] Ending session")
+        Args:
+            force: If True, cancel response task immediately without waiting for remaining audio
+        """
+        already_inactive = not self.is_active
         self.is_active = False
+
+        logger.debug(f"[Connection {self.connection_id}] Ending session (force={force})")
 
         # Close the input stream - this signals to Deepgram that no more text is coming
         try:
             if self.stream and self.stream.input_stream:
                 await self.stream.input_stream.close()  # type: ignore
-                logger.debug(f"[Connection {self.connection_id}] Input stream closed, waiting for final audio")
+                logger.debug(f"[Connection {self.connection_id}] Input stream closed")
         except Exception as e:
             logger.debug(f"[Connection {self.connection_id}] Input stream close (may already be closed): {e}")
 
-        # Wait for the response processing task to complete naturally
+        # Wait for the response processing task to complete
         if self.response_task and not self.response_task.done():
-            try:
-                # Give it up to 30 seconds to finish processing remaining audio
-                # TTS can take longer than STT as it needs to synthesize all the text
-                await asyncio.wait_for(self.response_task, timeout=30.0)
-                logger.debug(f"[Connection {self.connection_id}] All audio received")
-            except asyncio.TimeoutError:
-                logger.warning(f"[Connection {self.connection_id}] Timeout waiting for final audio (30s elapsed)")
+            if force or already_inactive:
+                # Shutdown requested — cancel immediately rather than waiting
                 self.response_task.cancel()
-            except asyncio.CancelledError:
-                pass
+                try:
+                    await asyncio.wait_for(self.response_task, timeout=1.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+            else:
+                try:
+                    # Give it up to 30 seconds to finish processing remaining audio
+                    # TTS can take longer than STT as it needs to synthesize all the text
+                    await asyncio.wait_for(self.response_task, timeout=30.0)
+                    logger.debug(f"[Connection {self.connection_id}] All audio received")
+                except asyncio.TimeoutError:
+                    logger.warning(f"[Connection {self.connection_id}] Timeout waiting for final audio (30s elapsed)")
+                    self.response_task.cancel()
+                except asyncio.CancelledError:
+                    pass
 
-        logger.info(f"[Connection {self.connection_id}] Session ended successfully ({self.phrase_count} phrases, {self.bytes_received} bytes)")
+        logger.info(f"[Connection {self.connection_id}] Session ended ({self.phrase_count} phrases, {self.bytes_received} bytes)")
 
 
 class MultiConnectionTTSClient:
@@ -332,10 +334,12 @@ class MultiConnectionTTSClient:
         self.playback_connection_id = playback_connection_id
         self.bidi_endpoint = f"https://runtime.sagemaker.{region}.amazonaws.com:8443"
         self.client = None
+        self._boto_session = None
         self.connections = []
         self.is_active = False
         self.pyaudio_instance = None
         self.audio_stream = None
+        self._ended = False
 
     def _initialize_client(self):
         """Initialize the SageMaker Runtime HTTP2 client with AWS credentials"""
@@ -385,7 +389,38 @@ class MultiConnectionTTSClient:
             auth_schemes={"aws.auth#sigv4": SigV4AuthScheme(service="sagemaker")}
         )
         self.client = SageMakerRuntimeHTTP2Client(config=config)
+        self._boto_session = session
         logger.info("SageMaker client initialized successfully")
+
+    def verify_endpoint(self):
+        """
+        Verify the SageMaker endpoint exists and is InService.
+
+        Raises:
+            RuntimeError: If the endpoint does not exist or is not InService.
+        """
+        if not self._boto_session:
+            self._initialize_client()
+
+        assert self._boto_session is not None
+        sm_client = self._boto_session.client("sagemaker", region_name=self.region)
+        try:
+            response = sm_client.describe_endpoint(EndpointName=self.endpoint_name)
+        except ClientError as e:
+            error_code = e.response["Error"]["Code"]
+            if error_code == "ValidationException":
+                raise RuntimeError(
+                    f"Endpoint '{self.endpoint_name}' does not exist in region '{self.region}'"
+                ) from e
+            raise
+
+        status = response.get("EndpointStatus")
+        if status != "InService":
+            raise RuntimeError(
+                f"Endpoint '{self.endpoint_name}' is not ready (status: {status})"
+            )
+
+        logger.info(f"Endpoint '{self.endpoint_name}' is InService")
 
     async def initialize_connections(self, voice="aura-2-thalia-en", **kwargs):
         """
@@ -456,19 +491,20 @@ class MultiConnectionTTSClient:
 
         logger.info("Audio playback closed")
 
-    async def stream_text_and_playback_audio(self, duration_seconds):
+    async def stream_text_and_playback_audio(self, duration_seconds, phrases):
         """
         Stream text to all connections and playback audio from the selected connection
 
         Args:
             duration_seconds: How long to run the test for in seconds
+            phrases: List of text phrases to cycle through and send
         """
         if self.playback_connection_id <= self.num_connections:
             self._initialize_audio_playback()
 
         playback_conn = self.connections[self.playback_connection_id - 1] if self.playback_connection_id <= self.num_connections else None
 
-        start_time = time.time()
+        start_time = None  # Set when first audio chunk is played
         phrase_index = 0
         send_loop_done = False
 
@@ -477,11 +513,12 @@ class MultiConnectionTTSClient:
             nonlocal phrase_index, send_loop_done
             try:
                 while self.is_active:
-                    # Check if duration has elapsed
-                    elapsed = time.time() - start_time
-                    if elapsed >= duration_seconds:
-                        logger.info(f"Duration elapsed ({duration_seconds}s), stopping text generation")
-                        break
+                    # Check if duration has elapsed since first audio playback
+                    if start_time is not None:
+                        elapsed = time.time() - start_time
+                        if elapsed >= duration_seconds:
+                            logger.info(f"Duration elapsed ({duration_seconds}s), stopping text generation")
+                            break
 
                     # Check if all connections have errors
                     active_connections = [conn for conn in self.connections if conn.is_active]
@@ -489,7 +526,7 @@ class MultiConnectionTTSClient:
                         logger.error("All connections have failed, stopping text generation")
                         break
 
-                    phrase = TEST_PHRASES[phrase_index % len(TEST_PHRASES)]
+                    phrase = phrases[phrase_index % len(phrases)]
                     phrase_index += 1
 
                     # Send to all active connections in parallel
@@ -509,29 +546,41 @@ class MultiConnectionTTSClient:
             finally:
                 send_loop_done = True
                 logger.debug("Text sending loop completed")
+                # Forcibly stop the audio stream so any in-progress write()
+                # call on the playback thread is interrupted immediately
+                if self.audio_stream:
+                    try:
+                        self.audio_stream.stop_stream()
+                    except Exception:
+                        pass
 
         async def playback_audio_loop():
             """Process and playback audio from the selected connection"""
+            nonlocal start_time
+            loop = asyncio.get_running_loop()
             try:
-                no_data_timeout = 2.0  # seconds
-                last_data_time = time.time()
-
                 while self.is_active and playback_conn:
                     if not playback_conn.audio_buffer.empty():
                         audio_data = playback_conn.audio_buffer.get()
+                        if start_time is None:
+                            start_time = time.time()
+                            logger.info("First audio received, duration timer started")
                         try:
-                            self.audio_stream.write(audio_data)
+                            # Run blocking PyAudio write on a thread so the event loop
+                            # (and the duration timer) remain responsive during playback
+                            await loop.run_in_executor(
+                                None, self.audio_stream.write, audio_data
+                            )
                             logger.debug(f"Played {len(audio_data)} bytes of audio")
                         except Exception as e:
+                            if send_loop_done:
+                                # Stream was stopped by the duration expiry — exit cleanly
+                                logger.debug("Audio write interrupted by stream stop")
+                                return
                             logger.error(f"Error writing audio: {e}")
-                        last_data_time = time.time()
-                    elif send_loop_done and playback_conn.response_task and playback_conn.response_task.done():
-                        # Send loop is done, response processor is done, and buffer is empty - no more audio coming
-                        logger.debug(f"All audio received and played from connection {playback_conn.connection_id}")
-                        break
-                    elif send_loop_done and (time.time() - last_data_time > no_data_timeout):
-                        # Send loop is done and no data received for timeout period, assume stream is done
-                        logger.debug(f"No audio data received for {no_data_timeout}s after send complete, exiting playback loop")
+                    elif send_loop_done:
+                        # Duration elapsed — stop playback immediately
+                        logger.debug("Send loop done, stopping audio playback")
                         break
                     else:
                         # Small delay to prevent busy waiting
@@ -542,55 +591,27 @@ class MultiConnectionTTSClient:
                 raise
 
         # Run both loops concurrently
-        try:
-            if playback_conn:
-                await asyncio.gather(
-                    send_text_loop(),
-                    playback_audio_loop()
-                )
-            else:
-                await send_text_loop()
-        finally:
-            # After duration expires, send Close message to all connections
-            # This signals to Deepgram to finalize synthesis according to API spec
-            logger.info("Sending Close message to all connections")
-            close_tasks = [
-                conn.send_close_message()
-                for conn in self.connections
-                if conn.is_active
-            ]
-            if close_tasks:
-                await asyncio.gather(*close_tasks)
+        if playback_conn:
+            await asyncio.gather(
+                send_text_loop(),
+                playback_audio_loop()
+            )
+        else:
+            # No playback connection — start timer immediately when sending begins
+            start_time = time.time()
+            await send_text_loop()
 
-            # Small delay to allow Close message to be processed
-            await asyncio.sleep(0.1)
+    async def end_all_sessions(self, force=False):
+        """Close all streaming sessions
 
-            # Close input streams to signal end of transmission
-            logger.info("Closing all input streams")
-            for conn in self.connections:
-                if conn.is_active:
-                    try:
-                        await conn.stream.input_stream.close()  # type: ignore
-                        logger.debug(f"[Connection {conn.connection_id}] Input stream closed")
-                    except Exception as e:
-                        logger.debug(f"[Connection {conn.connection_id}] Error closing input stream: {e}")
-
-            # Close output streams
-            logger.info("Closing all output streams")
-            for conn in self.connections:
-                if conn.output_stream:
-                    try:
-                        await conn.output_stream.aclose()
-                        logger.debug(f"[Connection {conn.connection_id}] Output stream closed")
-                    except Exception as e:
-                        logger.debug(f"[Connection {conn.connection_id}] Error closing output stream: {e}")
-
-    async def end_all_sessions(self):
-        """Close all streaming sessions"""
-        if not self.is_active:
+        Args:
+            force: If True, cancel response tasks immediately (used on Ctrl+C)
+        """
+        if self._ended:
             return
+        self._ended = True
 
-        logger.debug("Ending all sessions")
+        logger.debug(f"Ending all sessions (force={force})")
         self.is_active = False
 
         # Close audio playback first
@@ -598,7 +619,7 @@ class MultiConnectionTTSClient:
 
         # End all connection sessions in parallel
         logger.info(f"Closing {len(self.connections)} connection(s)...")
-        tasks = [conn.end_session() for conn in self.connections]
+        tasks = [conn.end_session(force=force) for conn in self.connections]
         await asyncio.gather(*tasks)
 
         logger.info("All sessions ended successfully")
@@ -637,6 +658,11 @@ async def main():
         help="Deepgram TTS voice to use (default: aura-2-thalia-en)"
     )
     parser.add_argument(
+        "--text-file",
+        default="tts-input.txt",
+        help="Path to file containing text phrases to synthesize, one per line (default: tts-input.txt)"
+    )
+    parser.add_argument(
         "--region",
         default="us-east-2",
         help="AWS region (default: us-east-2)"
@@ -663,6 +689,21 @@ async def main():
         print("ERROR: --duration must be a positive integer (minimum 1 second)")
         sys.exit(1)
 
+    # Load text phrases from file
+    try:
+        with open(args.text_file, "r", encoding="utf-8") as f:
+            phrases = [line.strip() for line in f if line.strip()]
+    except FileNotFoundError:
+        print(f"ERROR: Text file not found: {args.text_file}")
+        sys.exit(1)
+    except OSError as e:
+        print(f"ERROR: Could not read text file '{args.text_file}': {e}")
+        sys.exit(1)
+
+    if not phrases:
+        print(f"ERROR: Text file '{args.text_file}' contains no non-empty lines")
+        sys.exit(1)
+
     # Configure logging
     logging.basicConfig(
         level=getattr(logging, args.log_level),
@@ -679,6 +720,7 @@ async def main():
     print(f"Duration: {args.duration} seconds")
     print(f"Voice: {args.voice}")
     print(f"Region: {args.region}")
+    print(f"Text file: {args.text_file} ({len(phrases)} phrase(s))")
     print(f"Sample Rate: {SAMPLE_RATE} Hz")
     print(f"Channels: {CHANNELS} (Mono)")
     print("=" * 60)
@@ -691,14 +733,32 @@ async def main():
         playback_connection_id=args.playback
     )
 
-    # Handle Ctrl+C gracefully
-    def signal_handler(_sig, _frame):
-        print("\n\nReceived interrupt signal, stopping...")
-        client.is_active = False
+    loop = asyncio.get_running_loop()
+    streaming_task = None
+    shutdown_event = asyncio.Event()
 
-    signal.signal(signal.SIGINT, signal_handler)
+    def handle_sigint():
+        if not shutdown_event.is_set():
+            print("\n\nReceived interrupt signal, stopping...")
+            shutdown_event.set()
+            # Mark all connections inactive so their loops exit
+            client.is_active = False
+            for conn in client.connections:
+                conn.is_active = False
+                if conn.response_task and not conn.response_task.done():
+                    conn.response_task.cancel()
+            # Cancel the streaming task so stream_text_and_playback_audio exits
+            if streaming_task and not streaming_task.done():
+                streaming_task.cancel()
 
+    loop.add_signal_handler(signal.SIGINT, handle_sigint)
+
+    exit_code = 0
     try:
+        # Verify the endpoint exists and is ready before opening connections
+        client._initialize_client()
+        client.verify_endpoint()
+
         # Initialize all connections with Deepgram parameters
         await client.initialize_connections(voice=args.voice)
 
@@ -710,20 +770,25 @@ async def main():
         print("="*60 + "\n")
 
         # Stream text and playback audio
-        await client.stream_text_and_playback_audio(args.duration)
+        streaming_task = asyncio.create_task(
+            client.stream_text_and_playback_audio(args.duration, phrases)
+        )
+        await streaming_task
 
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
+    except asyncio.CancelledError:
+        logger.info("Streaming cancelled by user")
     except Exception as e:
         logger.error(f"Error during streaming: {e}", exc_info=True)
-        return 1
+        exit_code = 1
     finally:
-        # Clean up
-        await client.end_all_sessions()
+        loop.remove_signal_handler(signal.SIGINT)
         print("\n" + "="*60)
+        if not shutdown_event.is_set():
+            await client.end_all_sessions(force=True)
 
-    logger.info("✅ TTS streaming complete!")
-    return 0
+    if not shutdown_event.is_set() and exit_code == 0:
+        logger.info("✅ TTS streaming complete!")
+    return exit_code
 
 
 if __name__ == "__main__":
