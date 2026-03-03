@@ -5,11 +5,15 @@ requires-python = ">=3.12"
 [[package]]
 name = "aws-sdk-sagemaker-runtime-http2"
 version = "0.3.0"
-source = { git = "https://github.com/awslabs/aws-sdk-python?subdirectory=clients%2Faws-sdk-sagemaker-runtime-http2#b490c87293ab3545ea28c153f952e5f2de8ac871" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "smithy-aws-core", extra = ["eventstream", "json"] },
     { name = "smithy-core" },
     { name = "smithy-http", extra = ["awscrt"] },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8f/43/6c4e583b10e826b458e00e28076d78c0447c5f14f51c24eb72e181f1be39/aws_sdk_sagemaker_runtime_http2-0.3.0.tar.gz", hash = "sha256:580825ce317baf2b4e73d6b6ce9d8b77e8dac5f98167c56520b00e2433bb29bc", size = 20985, upload-time = "2026-01-02T17:55:12.459Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f1/fe/18d15111c4672695685f82ee73ef56584f24e106c64c6187ba3d924f7865/aws_sdk_sagemaker_runtime_http2-0.3.0-py3-none-any.whl", hash = "sha256:d05b17db24959f38f635cfd0fe75e1aa3fa4fe2bc1f5cf6a2749728f7e815fee", size = 21766, upload-time = "2026-01-02T17:55:11.373Z" },
 ]
 
 [[package]]
@@ -179,7 +183,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aws-sdk-sagemaker-runtime-http2", git = "https://github.com/awslabs/aws-sdk-python?subdirectory=clients%2Faws-sdk-sagemaker-runtime-http2" },
+    { name = "aws-sdk-sagemaker-runtime-http2" },
     { name = "boto3", specifier = ">=1.42.34" },
     { name = "pyaudio", specifier = ">=0.2.14" },
 ]

@@ -55,18 +55,24 @@ class DeepgramSageMakerTTSConnection:
     Each connection handles its own stream and audio response processing.
     """
 
-    def __init__(self, connection_id, client, endpoint_name, should_playback=False):
+    def __init__(self, connection_id, client, endpoint_name, should_playback=False, boto_session=None):
         self.connection_id = connection_id
         self.client = client
         self.endpoint_name = endpoint_name
         self.should_playback = should_playback
+        self.boto_session = boto_session
         self.stream = None
         self.output_stream = None
         self.is_active = False
+        self.close_sent = False
         self.response_task = None
         self.audio_buffer = Queue()
         self.bytes_received = 0
         self.phrase_count = 0
+        # Set initially so the first phrase can be sent without waiting.
+        self._flushed_event = asyncio.Event()
+        self._flushed_event.set()
+        self._last_flush_time = 0.0
 
     async def start_session(self, voice="aura-2-thalia-en", **kwargs):
         """
@@ -126,7 +132,7 @@ class DeepgramSageMakerTTSConnection:
         Returns:
             True if sent successfully, False otherwise
         """
-        if not self.is_active:
+        if not self.is_active or self.close_sent:
             return False
 
         try:
@@ -142,7 +148,7 @@ class DeepgramSageMakerTTSConnection:
             event = RequestStreamEventPayloadPart(value=payload)
             await self.stream.input_stream.send(event)
             self.phrase_count += 1
-            logger.debug(f"[Connection {self.connection_id}] Sent phrase {self.phrase_count}: '{text}'")
+            logger.info(f"[Connection {self.connection_id}] Sent text chunk {self.phrase_count} ({len(message_bytes)} bytes): {text!r}")
             return True
         except Exception as e:
             logger.error(f"[Connection {self.connection_id}] Error sending text: {e}")
@@ -168,11 +174,154 @@ class DeepgramSageMakerTTSConnection:
             payload = RequestPayloadPart(bytes_=message_bytes, data_type="UTF8")
             event = RequestStreamEventPayloadPart(value=payload)
             await self.stream.input_stream.send(event)
+            self.close_sent = True
             logger.info(f"[Connection {self.connection_id}] Sent Close message")
             return True
         except Exception as e:
             logger.error(f"[Connection {self.connection_id}] Error sending Close message: {e}")
             return False
+
+    async def send_flush(self):
+        """
+        Send a Flush message to force Deepgram to synthesize buffered text immediately.
+
+        Clears the flushed event before sending so that wait_for_flushed() will
+        block until the server acknowledges this flush with a Flushed response.
+
+        Returns:
+            True if sent successfully, False otherwise
+        """
+        if not self.is_active or self.close_sent:
+            return False
+
+        # Deepgram enforces a maximum of 20 Flush messages per 60-second window
+        # per connection. Sleep the remaining time if we're within that window so
+        # text sent since the last flush continues to accumulate in the buffer.
+        MIN_FLUSH_INTERVAL = 3.0
+        now = time.monotonic()
+        wait = (self._last_flush_time + MIN_FLUSH_INTERVAL) - now
+        if wait > 0:
+            logger.debug(f"[Connection {self.connection_id}] Flush rate limit: waiting {wait:.2f}s")
+            await asyncio.sleep(wait)
+
+        if not self.is_active or self.close_sent:
+            self._flushed_event.set()
+            return False
+
+        self._flushed_event.clear()
+        try:
+            message = {"type": "Flush"}
+            message_bytes = json.dumps(message).encode('utf-8')
+            payload = RequestPayloadPart(bytes_=message_bytes, data_type="UTF8")
+            event = RequestStreamEventPayloadPart(value=payload)
+            await self.stream.input_stream.send(event)
+            self._last_flush_time = time.monotonic()
+            logger.debug(f"[Connection {self.connection_id}] Sent Flush")
+            return True
+        except Exception as e:
+            logger.error(f"[Connection {self.connection_id}] Error sending Flush: {e}")
+            self.is_active = False
+            self._flushed_event.set()  # Unblock any waiters
+            return False
+
+    async def wait_for_flushed(self, timeout: float = 30.0) -> bool:
+        """
+        Block until the server acknowledges the last Flush with a Flushed message.
+
+        Returns immediately if the connection is inactive or no flush is in flight.
+
+        Args:
+            timeout: Maximum seconds to wait before marking the connection failed.
+
+        Returns:
+            True if Flushed was received (or no flush was outstanding), False on timeout.
+        """
+        if not self.is_active:
+            return True
+        try:
+            await asyncio.wait_for(self._flushed_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            logger.error(
+                f"[Connection {self.connection_id}] Timed out waiting for Flushed "
+                f"acknowledgment after {timeout}s — marking connection failed"
+            )
+            self.is_active = False
+            return False
+
+    def _log_exception_details(self, exc: Exception):
+        """
+        Walk the full exception chain and print every piece of structured detail
+        that smithy / botocore / AWS SDK exceptions may carry.
+        """
+        prefix = f"[Connection {self.connection_id}]"
+
+        # Collect the full cause chain without infinite loops
+        chain: list[Exception] = []
+        seen: set[int] = set()
+        current: Exception | None = exc
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            chain.append(current)
+            cause = current.__cause__
+            if cause is None and not current.__suppress_context__:
+                cause = current.__context__
+            current = cause
+
+        print(f"\n--- Error details [Connection {self.connection_id}] ---", file=sys.stderr)
+
+        for depth, err in enumerate(chain):
+            indent = "  " * depth
+            label = "Exception" if depth == 0 else "Caused by"
+            print(f"{indent}{label}: {type(err).__name__}: {err}", file=sys.stderr)
+            logger.error(f"{prefix} {label}: {type(err).__name__}: {err}")
+
+            # Smithy ServiceError / AWS SDK typed fields
+            for attr in ("code", "fault", "message", "request_id", "error_code"):
+                val = getattr(err, attr, None)
+                if val and str(val) not in str(err):
+                    print(f"{indent}  .{attr} = {val}", file=sys.stderr)
+                    logger.error(f"{prefix}{indent}  .{attr} = {val}")
+
+            # HTTP response object (smithy-python style)
+            http_resp = getattr(err, "http_response", None)
+            if http_resp:
+                status = getattr(http_resp, "status", None) or getattr(http_resp, "status_code", None)
+                if status:
+                    print(f"{indent}  http_status = {status}", file=sys.stderr)
+                    logger.error(f"{prefix}{indent}  http_status = {status}")
+                body = getattr(http_resp, "body", None)
+                if isinstance(body, (bytes, bytearray)):
+                    self._print_body(body, indent, prefix)
+
+            # Direct .body attribute (some smithy versions)
+            body = getattr(err, "body", None)
+            if isinstance(body, (bytes, bytearray)):
+                self._print_body(body, indent, prefix)
+
+            # botocore-style .response dict
+            response = getattr(err, "response", None)
+            if isinstance(response, dict):
+                error_info = response.get("Error", {})
+                if error_info:
+                    code = error_info.get("Code", "")
+                    msg = error_info.get("Message", "")
+                    print(f"{indent}  Error.Code = {code}", file=sys.stderr)
+                    print(f"{indent}  Error.Message = {msg}", file=sys.stderr)
+                    logger.error(f"{prefix}{indent}  Error.Code={code}, Error.Message={msg}")
+
+        print("--- End error details ---\n", file=sys.stderr)
+
+    def _print_body(self, body: bytes, indent: str, log_prefix: str):
+        """Decode and print a raw HTTP response body, pretty-printing JSON if possible."""
+        try:
+            parsed = json.loads(body.decode("utf-8"))
+            text = json.dumps(parsed, indent=2)
+            print(f"{indent}  response_body =\n{text}", file=sys.stderr)
+            logger.error(f"{log_prefix}{indent}  response_body = {text}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            print(f"{indent}  response_body (raw) = {body!r}", file=sys.stderr)
+            logger.error(f"{log_prefix}{indent}  response_body (raw) = {body!r}")
 
     async def _process_audio_responses(self):
         """Process streaming responses from Deepgram according to API specification"""
@@ -197,18 +346,56 @@ class DeepgramSageMakerTTSConnection:
                         message_type = message.get('type', 'Unknown')
 
                         if message_type == 'Metadata':
-                            logger.debug(f"[Connection {self.connection_id}] Received metadata: "
-                                       f"model={message.get('model_name')}, "
-                                       f"request_id={message.get('request_id')}")
+                            uuids = message.get('additional_model_uuids') or []
+                            logger.debug(
+                                f"[Connection {self.connection_id}] Metadata: "
+                                f"request_id={message.get('request_id')} "
+                                f"model={message.get('model_name')} "
+                                f"version={message.get('model_version')} "
+                                f"model_uuid={message.get('model_uuid')}"
+                                + (f" additional_uuids={uuids}" if uuids else "")
+                            )
 
                         elif message_type == 'Warning':
-                            logger.warning(f"[Connection {self.connection_id}] API Warning: {message.get('description')} (code: {message.get('code')})")
+                            logger.warning(
+                                f"[Connection {self.connection_id}] Warning "
+                                f"[{message.get('warn_code')}]: {message.get('warn_msg')}"
+                            )
 
-                        elif message_type in ('Flushed', 'Cleared'):
-                            logger.debug(f"[Connection {self.connection_id}] Received {message_type} message (seq: {message.get('sequence_id')})")
+                        elif message_type == 'Flushed':
+                            self._flushed_event.set()
+                            logger.debug(
+                                f"[Connection {self.connection_id}] Flushed "
+                                f"(sequence_id={message.get('sequence_id')})"
+                            )
+
+                        elif message_type == 'Cleared':
+                            logger.debug(
+                                f"[Connection {self.connection_id}] Cleared "
+                                f"(sequence_id={message.get('sequence_id')})"
+                            )
+
+                        elif message_type == 'Error':
+                            # Not part of the Deepgram TTS spec; may originate from the
+                            # SageMaker inference layer.
+                            err_code = message.get('err_code') or message.get('code', 'unknown')
+                            description = message.get('description') or message.get('message', 'No description provided')
+                            err_msg = message.get('err_msg', '')
+                            detail = f" — {err_msg}" if err_msg else ""
+                            logger.error(
+                                f"[Connection {self.connection_id}] Error "
+                                f"[{err_code}]: {description}{detail}"
+                            )
+                            print(
+                                f"ERROR [Connection {self.connection_id}]: [{err_code}] {description}{detail}",
+                                file=sys.stderr
+                            )
 
                         else:
-                            logger.debug(f"[Connection {self.connection_id}] Received unknown message type: {message_type}")
+                            logger.warning(
+                                f"[Connection {self.connection_id}] Unrecognised message type: "
+                                f"{message_type!r} — {message}"
+                            )
 
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         # Not JSON - treat as binary audio data
@@ -245,11 +432,43 @@ class DeepgramSageMakerTTSConnection:
                             message_type = message.get('type', 'Unknown')
 
                             if message_type == 'Metadata':
-                                logger.debug(f"[Connection {self.connection_id}] Received metadata: "
-                                           f"model={message.get('model_name')}, "
-                                           f"request_id={message.get('request_id')}")
+                                uuids = message.get('additional_model_uuids') or []
+                                logger.debug(
+                                    f"[Connection {self.connection_id}] Metadata: "
+                                    f"request_id={message.get('request_id')} "
+                                    f"model={message.get('model_name')} "
+                                    f"version={message.get('model_version')} "
+                                    f"model_uuid={message.get('model_uuid')}"
+                                    + (f" additional_uuids={uuids}" if uuids else "")
+                                )
                             elif message_type == 'Warning':
-                                logger.warning(f"[Connection {self.connection_id}] API Warning: {message.get('description')}")
+                                logger.warning(
+                                    f"[Connection {self.connection_id}] Warning "
+                                    f"[{message.get('code')}]: {message.get('description')}"
+                                )
+                            elif message_type in ('Flushed', 'Cleared'):
+                                logger.debug(
+                                    f"[Connection {self.connection_id}] {message_type} "
+                                    f"(sequence_id={message.get('sequence_id')})"
+                                )
+                            elif message_type == 'Error':
+                                err_code = message.get('err_code') or message.get('code', 'unknown')
+                                description = message.get('description') or message.get('message', 'No description provided')
+                                err_msg = message.get('err_msg', '')
+                                detail = f" — {err_msg}" if err_msg else ""
+                                logger.error(
+                                    f"[Connection {self.connection_id}] Error "
+                                    f"[{err_code}]: {description}{detail}"
+                                )
+                                print(
+                                    f"ERROR [Connection {self.connection_id}]: [{err_code}] {description}{detail}",
+                                    file=sys.stderr
+                                )
+                            else:
+                                logger.warning(
+                                    f"[Connection {self.connection_id}] Unrecognised message type: "
+                                    f"{message_type!r} — {message}"
+                                )
 
                         except (json.JSONDecodeError, UnicodeDecodeError):
                             # Not JSON - treat as binary audio data
@@ -273,7 +492,7 @@ class DeepgramSageMakerTTSConnection:
                 logger.debug(f"[Connection {self.connection_id}] Processed {remaining_count} additional audio responses after stream close")
 
         except Exception as e:
-            logger.error(f"[Connection {self.connection_id}] Error processing audio responses: {e}", exc_info=True)
+            self._log_exception_details(e)
 
     async def end_session(self, force=False):
         """Close the streaming session
@@ -283,6 +502,7 @@ class DeepgramSageMakerTTSConnection:
         """
         already_inactive = not self.is_active
         self.is_active = False
+        self._flushed_event.set()  # Unblock any send loop waiting on wait_for_flushed()
 
         logger.debug(f"[Connection {self.connection_id}] Ending session (force={force})")
 
@@ -438,7 +658,7 @@ class MultiConnectionTTSClient:
         # Create all connections
         for i in range(1, self.num_connections + 1):
             should_playback = (i == self.playback_connection_id)
-            conn = DeepgramSageMakerTTSConnection(i, self.client, self.endpoint_name, should_playback=should_playback)
+            conn = DeepgramSageMakerTTSConnection(i, self.client, self.endpoint_name, should_playback=should_playback, boto_session=self._boto_session)
             self.connections.append(conn)
 
         # Start all sessions in parallel
@@ -520,7 +740,23 @@ class MultiConnectionTTSClient:
                             logger.info(f"Duration elapsed ({duration_seconds}s), stopping text generation")
                             break
 
-                    # Check if all connections have errors
+                    active_connections = [conn for conn in self.connections if conn.is_active]
+                    if not active_connections:
+                        logger.error("All connections have failed, stopping text generation")
+                        break
+
+                    # Wait for every active connection to acknowledge the previous Flush
+                    # before sending the next phrase. This keeps the pipeline in sync and
+                    # prevents exceeding the server-side flush rate limit.
+                    await asyncio.gather(*[conn.wait_for_flushed() for conn in active_connections])
+
+                    # Re-check after waiting — duration may have elapsed or connections failed
+                    if not self.is_active:
+                        break
+                    if start_time is not None and time.time() - start_time >= duration_seconds:
+                        logger.info(f"Duration elapsed ({duration_seconds}s), stopping text generation")
+                        break
+
                     active_connections = [conn for conn in self.connections if conn.is_active]
                     if not active_connections:
                         logger.error("All connections have failed, stopping text generation")
@@ -529,16 +765,14 @@ class MultiConnectionTTSClient:
                     phrase = phrases[phrase_index % len(phrases)]
                     phrase_index += 1
 
-                    # Send to all active connections in parallel
-                    tasks = [
-                        conn.send_text(phrase)
+                    # Send text then Flush to trigger audio synthesis.
+                    # Per Deepgram docs, audio is only generated after a Flush.
+                    await asyncio.gather(*[conn.send_text(phrase) for conn in active_connections])
+                    await asyncio.gather(*[
+                        conn.send_flush()
                         for conn in active_connections
-                    ]
-                    if tasks:
-                        await asyncio.gather(*tasks)
-
-                    # Small delay between phrases
-                    await asyncio.sleep(0.5)
+                        if conn.is_active and not conn.close_sent
+                    ])
 
             except Exception as e:
                 logger.error(f"Error in text sending loop: {e}")
