@@ -20,12 +20,14 @@ batch   – Synchronous HTTP via the SageMaker InvokeEndpoint API and the
 
 import asyncio
 import argparse
+import concurrent.futures
 import json
 import logging
 import os
 import signal
 import statistics
 import sys
+import threading
 import time
 import wave
 from urllib.parse import quote
@@ -442,14 +444,15 @@ class BatchSTTClient:
         self.endpoint_name = endpoint_name
         self.wav_path = wav_path
         self.region = region
-        self.sm_client = None
+        self._session: boto3.Session | None = None
+        self._thread_local = threading.local()
 
         self.sample_rate: int | None = None
         self.channels: int | None = None
         self.duration_seconds: float | None = None
 
     def _initialize_client(self):
-        """Resolve AWS credentials and create the boto3 sagemaker-runtime client."""
+        """Resolve AWS credentials and verify identity. Stores the session for per-thread client creation."""
         try:
             session = boto3.Session(region_name=self.region)
             credentials = session.get_credentials()
@@ -460,8 +463,8 @@ class BatchSTTClient:
             caller_identity = session.client('sts').get_caller_identity()
             logger.debug(f"Authenticated as: {caller_identity.get('Arn', 'Unknown')}")
 
-            self.sm_client = session.client('sagemaker-runtime')
-            logger.info("SageMaker runtime client initialized")
+            self._session = session
+            logger.info("AWS credentials resolved")
 
         except (NoCredentialsError, PartialCredentialsError) as e:
             logger.error("AWS credentials not found. Configure via one of:")
@@ -470,6 +473,13 @@ class BatchSTTClient:
             logger.error("  3. ~/.aws/credentials")
             logger.error("  4. IAM role (when running on AWS infrastructure)")
             raise RuntimeError("AWS credentials not available") from e
+
+    def _get_thread_client(self):
+        """Return a per-thread boto3 sagemaker-runtime client, creating one if needed."""
+        if not hasattr(self._thread_local, 'sm_client'):
+            self._thread_local.sm_client = self._session.client('sagemaker-runtime')
+            logger.debug(f"Created sagemaker-runtime client for thread {threading.current_thread().name}")
+        return self._thread_local.sm_client
 
     def load_wav(self) -> bytes:
         """
@@ -517,29 +527,27 @@ class BatchSTTClient:
         )
         return audio_bytes
 
-    async def _invoke_once(
+    def _invoke_once(
         self,
         request_id: int,
         audio_bytes: bytes,
         custom_attributes: str,
     ) -> tuple[int, float, dict | None, Exception | None]:
         """
-        Make a single InvokeEndpoint call.
+        Make a single InvokeEndpoint call on the calling thread.
 
+        Uses a per-thread boto3 client so concurrent calls don't share connections.
         Returns (request_id, elapsed_seconds, parsed_response_or_None, error_or_None).
         """
-        loop = asyncio.get_event_loop()
+        sm_client = self._get_thread_client()
         start = time.monotonic()
         try:
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.sm_client.invoke_endpoint(
-                    EndpointName=self.endpoint_name,
-                    Body=audio_bytes,
-                    ContentType='audio/wav',
-                    Accept='application/json',
-                    CustomAttributes=custom_attributes,
-                )
+            response = sm_client.invoke_endpoint(
+                EndpointName=self.endpoint_name,
+                Body=audio_bytes,
+                ContentType='audio/wav',
+                Accept='application/json',
+                CustomAttributes=custom_attributes,
             )
             elapsed = time.monotonic() - start
             body_bytes = response['Body'].read()
@@ -560,30 +568,36 @@ class BatchSTTClient:
             elapsed = time.monotonic() - start
             return request_id, elapsed, None, e
 
-    async def run(
+    def run(
         self,
         custom_attributes: str,
         num_requests: int = 1,
         concurrency: int = 1,
     ) -> list[tuple[int, float, dict | None, Exception | None]]:
         """
-        Run num_requests InvokeEndpoint calls with up to concurrency in parallel.
+        Run num_requests InvokeEndpoint calls using a ThreadPoolExecutor with
+        up to concurrency threads in parallel.  Each thread maintains its own
+        boto3 sagemaker-runtime client to avoid connection contention.
 
         Returns a list of (request_id, elapsed, result, error) tuples in
         completion order.
         """
-        if not self.sm_client:
+        if self._session is None:
             self._initialize_client()
 
         audio_bytes = self.load_wav()
-        semaphore = asyncio.Semaphore(concurrency)
 
-        async def bounded_invoke(req_id: int):
-            async with semaphore:
-                return await self._invoke_once(req_id, audio_bytes, custom_attributes)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=concurrency,
+            thread_name_prefix="batch-invoke",
+        ) as executor:
+            futures = {
+                executor.submit(self._invoke_once, i + 1, audio_bytes, custom_attributes): i + 1
+                for i in range(num_requests)
+            }
+            results = [future.result() for future in concurrent.futures.as_completed(futures)]
 
-        tasks = [bounded_invoke(i + 1) for i in range(num_requests)]
-        return await asyncio.gather(*tasks)
+        return results
 
 
 # ---------------------------------------------------------------------------
@@ -826,11 +840,13 @@ async def run_stream(args) -> int:
 async def run_batch(args) -> int:
     redact_list = _parse_redact(args.redact)
 
-    if args.requests < 1:
-        print("ERROR: --requests must be a positive integer (minimum 1)")
-        return 1
     if args.concurrency < 1:
         print("ERROR: --concurrency must be a positive integer (minimum 1)")
+        return 1
+    if args.requests is None:
+        args.requests = args.concurrency
+    if args.requests < 1:
+        print("ERROR: --requests must be a positive integer (minimum 1)")
         return 1
     if args.concurrency > args.requests:
         print("WARNING: --concurrency exceeds --requests; clamping to request count")
@@ -851,6 +867,7 @@ async def run_batch(args) -> int:
         return 1
 
     args.redact = redact_list
+    args.keyterms = [kt.strip() for kt in args.keyterms.split(',') if kt.strip()]
     custom_attributes = _build_batch_query_string(args)
 
     print("=" * 60)
@@ -879,10 +896,11 @@ async def run_batch(args) -> int:
 
     wall_start = time.monotonic()
 
-    results = await client.run(
-        custom_attributes=custom_attributes,
-        num_requests=args.requests,
-        concurrency=args.concurrency,
+    results = await asyncio.to_thread(
+        client.run,
+        custom_attributes,
+        args.requests,
+        args.concurrency,
     )
 
     wall_elapsed = time.monotonic() - wall_start
@@ -1006,14 +1024,14 @@ async def main() -> int:
     batch_parser.add_argument(
         "--requests",
         type=int,
-        default=1,
-        help="Total number of InvokeEndpoint requests to send (default: 1)",
+        default=None,
+        help="Total number of InvokeEndpoint requests to send (default: same as --concurrency)",
     )
     batch_parser.add_argument(
         "--concurrency",
         type=int,
         default=1,
-        help="Maximum number of requests to run in parallel (default: 1)",
+        help="Number of requests to run in parallel (default: 1)",
     )
 
     args = parser.parse_args()

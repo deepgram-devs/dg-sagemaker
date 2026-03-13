@@ -43,6 +43,28 @@ CHANNELS = 1  # Mono audio
 SAMPLE_RATE = 16000  # 16kHz sample rate (good for speech recognition)
 CHUNK_SIZE = 8192  # Bytes per audio chunk
 
+# Deepgram supported redaction entity types
+# https://developers.deepgram.com/docs/supported-entity-types
+REDACT_ENTITIES = [
+    # Broad group redactions
+    "pii", "phi", "pci",
+    # PII entities
+    "account_number", "age", "bank_account", "cardinal", "credit_card",
+    "credit_card_expiration", "cvv", "date", "date_interval", "dob",
+    "driver_license", "email_address", "event", "filename", "gender_sexuality",
+    "healthcare_number", "ip_address", "location", "location_address",
+    "location_city", "location_coordinate", "location_country", "location_state",
+    "location_zip", "money", "name", "name_given", "name_family",
+    "name_medical_professional", "numerical_pii", "occupation", "ordinal",
+    "origin", "passport_number", "password", "percent", "phone_number",
+    "physical_attribute", "ssn", "time", "url", "username", "vehicle_id",
+    # PHI entities
+    "condition", "drug", "injury", "blood_type", "medical_process", "statistics",
+    # Other entities
+    "language", "marital_status", "organization", "political_affiliation",
+    "religion", "routing_number", "zodiac_sign",
+]
+
 logger = logging.getLogger(__name__)
 
 
@@ -72,8 +94,9 @@ class DeepgramSageMakerConnection:
             language: Language code (default: en)
             **kwargs: Additional Deepgram query parameters (diarize, punctuate, etc.)
         """
-        # Extract keywords list if provided
+        # Extract multi-value list parameters before building query string
         keywords_list = kwargs.pop('keywords', [])
+        redact_list = kwargs.pop('redact_entities', [])
 
         # Build query string for Deepgram parameters
         query_params = {
@@ -91,6 +114,11 @@ class DeepgramSageMakerConnection:
         if keywords_list:
             keywords_params = "&".join(f"keywords={quote(kw)}" for kw in keywords_list)
             query_string = f"{query_string}&{keywords_params}"
+
+        # Add redact parameters (multiple values with same key)
+        if redact_list:
+            redact_params = "&".join(f"redact={quote(r)}" for r in redact_list)
+            query_string = f"{query_string}&{redact_params}"
 
         logger.debug(f"[Connection {self.connection_id}] Starting session with endpoint: {self.endpoint_name}")
         logger.debug(f"[Connection {self.connection_id}] Deepgram parameters: {query_string}")
@@ -528,6 +556,17 @@ async def main():
         default=None,
         help="Duration in seconds to run before stopping automatically (default: run until Ctrl+C)"
     )
+    parser.add_argument(
+        "--redact",
+        nargs="+",
+        default=[],
+        choices=REDACT_ENTITIES,
+        metavar="ENTITY",
+        help=(
+            "Redact one or more entity types from transcripts. "
+            f"Supported values: {', '.join(REDACT_ENTITIES)}"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -563,6 +602,8 @@ async def main():
     print(f"Duration: {args.duration}s" if args.duration else "Duration: until Ctrl+C")
     print(f"Sample Rate: {SAMPLE_RATE} Hz")
     print(f"Channels: {CHANNELS} (Mono)")
+    if args.redact:
+        print(f"Redact:          {', '.join(args.redact)}")
     print("=" * 60)
 
     # Create client
@@ -587,7 +628,8 @@ async def main():
             diarize=args.diarize,
             punctuate=args.punctuate,
             interim_results=args.interim_results,
-            keywords=keywords_list
+            keywords=keywords_list,
+            redact_entities=args.redact,
         )
 
         print("\n" + "="*60)
