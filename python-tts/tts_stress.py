@@ -197,7 +197,9 @@ class DeepgramSageMakerTTSConnection:
         # Deepgram enforces a maximum of 20 Flush messages per 60-second window
         # per connection. Sleep the remaining time if we're within that window so
         # text sent since the last flush continues to accumulate in the buffer.
-        MIN_FLUSH_INTERVAL = 3.0
+        # Use 4.0s (vs the 3.0s server minimum) to absorb event-loop scheduling
+        # jitter that would otherwise cause occasional EXCESSIVE_FLUSH warnings.
+        MIN_FLUSH_INTERVAL = 4.0
         now = time.monotonic()
         wait = (self._last_flush_time + MIN_FLUSH_INTERVAL) - now
         if wait > 0:
@@ -357,10 +359,19 @@ class DeepgramSageMakerTTSConnection:
                             )
 
                         elif message_type == 'Warning':
+                            warn_code = message.get('warn_code', '')
+                            warn_msg = message.get('warn_msg', '')
                             logger.warning(
                                 f"[Connection {self.connection_id}] Warning "
-                                f"[{message.get('warn_code')}]: {message.get('warn_msg')}"
+                                f"[{warn_code}]: {warn_msg}"
                             )
+                            if warn_code == 'EXCESSIVE_FLUSH':
+                                # The server rejected the last Flush due to rate limiting.
+                                # Unblock wait_for_flushed() so the send loop does not time
+                                # out and kill the connection, and reset the flush timer so
+                                # the next attempt is deferred by a full interval.
+                                self._last_flush_time = time.monotonic()
+                                self._flushed_event.set()
 
                         elif message_type == 'Flushed':
                             self._flushed_event.set()
@@ -1017,8 +1028,7 @@ async def main():
     finally:
         loop.remove_signal_handler(signal.SIGINT)
         print("\n" + "="*60)
-        if not shutdown_event.is_set():
-            await client.end_all_sessions(force=True)
+        await client.end_all_sessions(force=shutdown_event.is_set())
 
     if not shutdown_event.is_set() and exit_code == 0:
         logger.info("✅ TTS streaming complete!")
