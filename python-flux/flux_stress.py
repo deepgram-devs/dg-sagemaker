@@ -34,6 +34,7 @@ import os
 import signal
 import sys
 import time
+from typing import Callable
 import wave
 from queue import Queue
 from urllib.parse import quote
@@ -87,6 +88,7 @@ class DeepgramFluxConnection:
         self.turn_index = 0
         self.transcript_parts: list[str] = []
         self.close_requested = False
+        self.fatal_error_handler: Callable[[str], None] | None = None
 
     async def start_session(
         self,
@@ -282,10 +284,11 @@ class DeepgramFluxConnection:
                     f"[Connection {self.connection_id}] Stream closed after CloseStream: {e}"
                 )
             else:
-                logger.error(
-                    f"[Connection {self.connection_id}] Error in response processor: {e}",
-                    exc_info=True,
-                )
+                message = f"[Connection {self.connection_id}] Error in response processor: {e}"
+                self.is_active = False
+                logger.error(message, exc_info=True)
+                if self.fatal_error_handler:
+                    self.fatal_error_handler(message)
         except Exception as e:
             logger.error(
                 f"[Connection {self.connection_id}] Error in response processor: {e}",
@@ -470,6 +473,16 @@ class BaseFluxClient:
         self.connections: list[DeepgramFluxConnection] = []
         self.is_active = False
         self.sample_rate: int | None = None  # must be set before initialize_connections()
+        self.abort_reason: str | None = None
+
+    def request_abort(self, message: str):
+        """Stop the run after a fatal stream error and preserve the root cause."""
+        if self.abort_reason is not None:
+            return
+        self.abort_reason = message
+        self.is_active = False
+        for conn in self.connections:
+            conn.is_active = False
 
     def _initialize_client(self):
         """Resolve AWS credentials and build the SageMaker Runtime HTTP/2 client."""
@@ -537,6 +550,7 @@ class BaseFluxClient:
 
         for i in range(self.num_connections):
             conn = DeepgramFluxConnection(i + 1, self.client, self.endpoint_name)
+            conn.fatal_error_handler = self.request_abort
             self.connections.append(conn)
 
         await asyncio.gather(*[
@@ -956,6 +970,7 @@ async def run_file(args) -> int:
         client.is_active = False
 
     signal.signal(signal.SIGINT, signal_handler)
+    exit_code = 0
 
     try:
         await client.initialize_connections(
@@ -990,10 +1005,22 @@ async def run_file(args) -> int:
         logger.info("Interrupted by user")
     except Exception as e:
         logger.error(f"Error during streaming: {e}", exc_info=True)
-        return 1
+        exit_code = 1
     finally:
         await client.end_all_sessions()
         print("\n" + "=" * 60)
+
+    if client.abort_reason:
+        print("ERROR: Aborting early after a SageMaker response stream failure.")
+        print(f"Cause: {client.abort_reason}")
+        print(
+            "Validate your input parameters and examine CloudWatch Logs on the SageMaker "
+            "Endpoint to determine the root cause."
+        )
+        return 1
+
+    if exit_code:
+        return exit_code
 
     logger.info("Stress test complete")
     return 0
@@ -1045,6 +1072,7 @@ async def run_microphone(args) -> int:
         client.is_active = False
 
     signal.signal(signal.SIGINT, signal_handler)
+    exit_code = 0
 
     try:
         await client.initialize_connections(
@@ -1081,10 +1109,22 @@ async def run_microphone(args) -> int:
         logger.info("Interrupted by user")
     except Exception as e:
         logger.error(f"Error during streaming: {e}", exc_info=True)
-        return 1
+        exit_code = 1
     finally:
         await client.end_all_sessions()
         print("\n" + "=" * 60)
+
+    if client.abort_reason:
+        print("ERROR: Aborting early after a SageMaker response stream failure.")
+        print(f"Cause: {client.abort_reason}")
+        print(
+            "Validate your input parameters and examine CloudWatch Logs on the SageMaker "
+            "Endpoint to determine the root cause."
+        )
+        return 1
+
+    if exit_code:
+        return exit_code
 
     logger.info("Stress test complete")
     return 0
