@@ -558,10 +558,16 @@ class BatchSTTClient:
             elapsed = time.monotonic() - start
             code = e.response['Error']['Code']
             msg = e.response['Error']['Message']
-            err = RuntimeError(
-                f"SageMaker InvokeEndpoint failed [{code}]: {msg}. "
-                "Check the endpoint name, region, and that the endpoint is InService."
-            )
+            if code == 'ModelError':
+                inner = _unwrap_sagemaker_model_error(msg)
+                err = RuntimeError(
+                    f"Model returned an error [{code}]:\n{inner}"
+                )
+            else:
+                err = RuntimeError(
+                    f"SageMaker InvokeEndpoint failed [{code}]: {msg}. "
+                    "Check the endpoint name, region, and that the endpoint is InService."
+                )
             return request_id, elapsed, None, err
 
         except Exception as e:
@@ -603,6 +609,28 @@ class BatchSTTClient:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _unwrap_sagemaker_model_error(msg: str) -> str:
+    """
+    Extract the inner model error message from a SageMaker ModelError string.
+
+    SageMaker wraps model errors in a message of the form:
+        Received client error (NNN) from primary with message "INNER". See ...
+
+    If the inner message is JSON, it is pretty-printed.  Falls back to
+    returning the original *msg* unchanged when the pattern is not matched.
+    """
+    import re
+    match = re.search(r'with message "(.+?)"\.\s*See ', msg, re.DOTALL)
+    if not match:
+        return msg
+    inner = match.group(1)
+    try:
+        parsed = json.loads(inner)
+        return json.dumps(parsed, indent=2)
+    except (json.JSONDecodeError, ValueError):
+        return inner
+
 
 def _parse_redact(value: str) -> list[str]:
     """
@@ -646,6 +674,8 @@ def _build_batch_query_string(args) -> str:
         params.extend(f"redact={quote(r)}" for r in args.redact)
     if args.keyterms:
         params.extend(f"keyterm={quote(kt)}" for kt in args.keyterms)
+    if args.keywords:
+        params.extend(f"keywords={quote(kw)}" for kw in args.keywords)
     return "v1/listen?" + "&".join(params)
 
 
@@ -784,6 +814,8 @@ async def run_stream(args) -> int:
     print(f"Limit:       {limit_str}")
     if redact_list:
         print(f"Redact:      {', '.join(redact_list)}")
+    if keywords_list:
+        print(f"Keywords:    {', '.join(keywords_list)}")
     if keyterms_list:
         print(f"Keyterms:    {', '.join(keyterms_list)}")
     print("=" * 60)
@@ -868,6 +900,7 @@ async def run_batch(args) -> int:
 
     args.redact = redact_list
     args.keyterms = [kt.strip() for kt in args.keyterms.split(',') if kt.strip()]
+    args.keywords = [kw.strip() for kw in args.keywords.split(',') if kw.strip()]
     custom_attributes = _build_batch_query_string(args)
 
     print("=" * 60)
@@ -886,8 +919,10 @@ async def run_batch(args) -> int:
     print(f"Concurrency:  {args.concurrency}")
     if redact_list:
         print(f"Redact:       {', '.join(redact_list)}")
+    if args.keywords:
+        print(f"Keywords:     {', '.join(args.keywords)}")
     if args.keyterms:
-        print(f"Keyterms:     {args.keyterms}")
+        print(f"Keyterms:     {', '.join(args.keyterms)}")
     print(f"Path+Params:  {custom_attributes}")
     print("=" * 60)
 
@@ -989,7 +1024,13 @@ async def main() -> int:
     stream_parser.add_argument(
         "--keywords",
         default="",
-        help="Comma-delimited keywords in format 'keyword:intensity' (e.g., 'hello:5,world:10')",
+        metavar="KEYWORD[:INTENSITY],KEYWORD[:INTENSITY],...",
+        help=(
+            "Comma-separated list of keywords to boost recognition for nova-2 and earlier models "
+            "(e.g., 'Deepgram:5,SageMaker'). Append :INTENSITY to boost (positive) or suppress "
+            "(negative) a keyword. Each keyword is sent as keywords=<value>. "
+            "For nova-3, use --keyterms instead."
+        ),
     )
     stream_parser.add_argument(
         "--interim-results",
@@ -1021,6 +1062,17 @@ async def main() -> int:
         ),
     )
     _add_common_args(batch_parser)
+    batch_parser.add_argument(
+        "--keywords",
+        default="",
+        metavar="KEYWORD[:INTENSITY],KEYWORD[:INTENSITY],...",
+        help=(
+            "Comma-separated list of keywords to boost recognition for nova-2 and earlier models "
+            "(e.g., 'Deepgram:5,SageMaker'). Append :INTENSITY to boost (positive) or suppress "
+            "(negative) a keyword. Each keyword is sent as keywords=<value>. "
+            "For nova-3, use --keyterms instead."
+        ),
+    )
     batch_parser.add_argument(
         "--requests",
         type=int,
