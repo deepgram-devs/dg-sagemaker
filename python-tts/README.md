@@ -1,218 +1,133 @@
 # Deepgram SageMaker Text-to-Speech Stress Test Client
 
-A Python client for stress testing Deepgram Text-to-Speech (TTS) endpoints deployed on AWS SageMaker. This tool supports multiple concurrent streaming connections for load testing, with audio playback from a single selectable connection.
+A Python client for stress testing Deepgram Text-to-Speech (TTS) endpoints deployed on AWS SageMaker. Streams text phrases to multiple simultaneous bidirectional connections for load testing, with audio playback from a single selectable connection.
 
-## Features
+## Prerequisites
 
-- **Multiple Concurrent Connections**: Create multiple simultaneous bidirectional streaming connections to a Deepgram TTS endpoint
-- **Selective Audio Playback**: Route audio output from any single connection to local system speakers while other connections discard audio
-- **Configurable Duration**: Specify how long the test should run
-- **Voice Selection**: Choose any Deepgram TTS voice
-- **Real-time Streaming**: Continuously stream text phrases to the endpoint while receiving synthesized audio
-- **Graceful Shutdown**: Properly closes connections using the Deepgram Close message API
-- **Detailed Logging**: Comprehensive debug and info logging for monitoring test execution
-
-## Requirements
-
-- Python 3.12 or higher
-- AWS credentials configured (via AWS CLI, environment variables, or IAM role)
-- PyAudio (for audio playback)
-- On macOS: `brew install portaudio` (required for PyAudio)
+- Python 3.12+
+- [uv](https://github.com/astral-sh/uv) package manager
+- AWS credentials configured (CLI, environment variables, or IAM role)
+- A deployed Amazon SageMaker endpoint running a Deepgram TTS model
+- PyAudio for audio playback:
+  - macOS: `brew install portaudio`
+  - Linux: `sudo apt-get install portaudio19-dev`
 
 ## Installation
-
-### 1. Install Python Dependencies
-
-Using `uv` (recommended):
 
 ```bash
 cd python-tts
 uv sync
 ```
 
-Or using `pip`:
+---
 
-```bash
-cd python-tts
-pip install -r requirements.txt
+## `tts_stress.py`
+
+Streams text phrases from a file to multiple simultaneous bidirectional connections to a Deepgram TTS endpoint on SageMaker. Audio from one selected connection is played back through local speakers; all other connections receive and discard audio.
+
+### Prepare a text input file
+
+Create a plain text file with one phrase per line (default: `tts-input.txt`):
+
+```
+Hello, this is a test of the Deepgram text-to-speech system.
+Welcome to the future of voice synthesis.
 ```
 
-### 2. Configure AWS Credentials
+Phrases are cycled repeatedly for the duration of the test.
 
-Ensure your AWS credentials are configured:
+### Examples
+
+**Basic usage (single connection, 30-second test):**
 
 ```bash
-aws configure
+uv run tts_stress.py your-endpoint-name
 ```
 
-Or set environment variables:
+**With a specific AWS region:**
+
 ```bash
-export AWS_ACCESS_KEY_ID=your_access_key
-export AWS_SECRET_ACCESS_KEY=your_secret_key
+uv run tts_stress.py your-endpoint-name --region us-west-2
 ```
 
-### 3. Install PyAudio (macOS)
+**Multiple simultaneous connections (load testing):**
 
 ```bash
-brew install portaudio
-pip install pyaudio
+uv run tts_stress.py your-endpoint-name --connections 5
 ```
 
-## Usage
-
-### Basic Usage
+**Select which connection plays audio to speakers:**
 
 ```bash
-uv run tts_stress.py your-sagemaker-endpoint-name
+uv run tts_stress.py your-endpoint-name --connections 5 --playback 3
 ```
 
-### Full Example with Options
+**With a different Deepgram TTS voice:**
 
 ```bash
-uv run tts_stress.py my-tts-endpoint \
+uv run tts_stress.py your-endpoint-name --voice aura-2-orion-en
+```
+
+**Custom duration and text file:**
+
+```bash
+uv run tts_stress.py your-endpoint-name --duration 60 --text-file my-phrases.txt
+```
+
+**Full example with all options:**
+
+```bash
+uv run tts_stress.py your-endpoint-name \
   --connections 5 \
   --playback 2 \
-  --duration 60 \
+  --duration 120 \
   --voice aura-2-thalia-en \
+  --text-file tts-input.txt \
   --region us-east-2 \
-  --log-level INFO
+  --log-level DEBUG
 ```
 
-## Command-Line Options
+### Options
 
-### Required Arguments
+| Option | Description | Default |
+|--------|-------------|---------|
+| `endpoint_name` | SageMaker endpoint name (required) | — |
+| `--connections N` | Number of simultaneous streaming connections | `1` |
+| `--playback N` | Connection ID whose audio is played to speakers (1-based, must be ≤ connections) | `1` |
+| `--duration SECONDS` | How long to run the test | `30` |
+| `--voice VOICE` | Deepgram TTS voice model | `aura-2-thalia-en` |
+| `--text-file PATH` | Path to a text file with phrases to synthesize, one per line | `tts-input.txt` |
+| `--region REGION` | AWS region | `us-east-2` |
+| `--log-level LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` | `INFO` |
 
-- **`endpoint_name`**: Name of your SageMaker endpoint (required)
+### How it works
 
-### Optional Arguments
+1. Text phrases are read from the input file and cycled repeatedly for the duration of the test.
+2. Each phrase is sent as a `Speak` message followed by a `Flush` to trigger audio synthesis.
+3. The script waits for a `Flushed` acknowledgement from every active connection before sending the next phrase, keeping all connections in sync and avoiding server-side rate limiting.
+4. The duration timer starts when the first audio chunk is received from the playback connection.
+5. On shutdown, the script waits up to 30 seconds for each connection to finish receiving remaining synthesized audio.
 
-- **`--connections`** (default: 1)
-  - Number of simultaneous streaming connections to create
-  - Example: `--connections 10` creates 10 connections
-
-- **`--playback`** (default: 1)
-  - Connection ID for audio playback to system speakers
-  - Must be between 1 and the number of connections
-  - Example: `--playback 3` plays audio from connection 3
-
-- **`--duration`** (default: 30)
-  - How long to run the test in seconds
-  - Example: `--duration 120` runs the test for 2 minutes
-
-- **`--voice`** (default: aura-2-thalia-en)
-  - Deepgram TTS voice to use
-  - Other examples: `aura-asteria-en`, `aura-luna-en`
-  - Example: `--voice aura-asteria-en`
-
-- **`--region`** (default: us-east-2)
-  - AWS region where the SageMaker endpoint is deployed
-  - Example: `--region us-west-2`
-
-- **`--log-level`** (default: INFO)
-  - Logging verbosity level
-  - Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
-  - Example: `--log-level DEBUG` for detailed debugging
-
-## Examples
-
-### Single Connection Test
-
-Test a single TTS connection for 30 seconds:
-
-```bash
-uv run tts_stress.py my-endpoint --duration 30
-```
-
-### Multi-Connection Load Test
-
-Create 5 concurrent connections with audio playback from connection 3:
-
-```bash
-uv run tts_stress.py my-endpoint --connections 5 --playback 3 --duration 60
-```
-
-### Extended Duration Test
-
-Run a stress test for 5 minutes (300 seconds):
-
-```bash
-uv run tts_stress.py my-endpoint --connections 10 --duration 300
-```
-
-### Different Voice
-
-Use a different voice for synthesis:
-
-```bash
-uv run tts_stress.py my-endpoint --voice aura-asteria-en --duration 60
-```
-
-### Debug Mode
-
-Enable debug logging for troubleshooting:
-
-```bash
-uv run tts_stress.py my-endpoint --log-level DEBUG --connections 2 --duration 30
-```
-
-## How It Works
-
-1. **Initialization**: Creates multiple bidirectional streaming connections to the SageMaker endpoint
-2. **Text Streaming**: Continuously sends test phrases (configurable in `TEST_PHRASES`) to all connections
-3. **Audio Reception**: Each connection receives synthesized audio from the Deepgram TTS engine
-4. **Selective Playback**: Audio from the selected connection is played to system speakers in real-time
-5. **Graceful Shutdown**: After the specified duration:
-   - Sends a Close message to all connections
-   - Closes input streams (stops sending text)
-   - Closes output streams
-   - Waits for any remaining audio to be received and played
-   - Exits cleanly
-
-## Test Phrases
-
-The script uses a rotating set of test phrases for TTS synthesis:
-
-- "Hello world"
-- "Testing text to speech"
-- "Streaming audio data"
-- "Multiple connections"
-- "SageMaker Deepgram integration"
-
-To customize the test phrases, edit the `TEST_PHRASES` list in `tts_stress.py`.
-
-## Performance Metrics
-
-The script outputs metrics for each connection:
-
-- Number of phrases sent
-- Total bytes of audio received
-- Connection duration
+---
 
 ## Troubleshooting
 
-### Audio Not Playing
+### Audio not playing
 
-- Ensure `--playback` parameter specifies a valid connection ID (1 to N)
+- Verify `--playback` is between 1 and the number of `--connections`
 - Check system audio output settings
-- Verify PyAudio is properly installed: `python -c "import pyaudio; print('OK')"`
+- Verify PyAudio is installed: `python -c "import pyaudio; print('OK')"`
+- macOS: `brew install portaudio && pip install pyaudio`
 
-### Connection Errors
+### Connection errors
 
-- Verify the endpoint name is correct
-- Ensure AWS credentials are configured
-- Check that the endpoint is in the specified region
-- Verify the endpoint is running and accepting connections
-  - CloudWatch Logs for the SageMaker Endpoint can aid in identifying server-side errors
+- Verify the endpoint name is correct and matches the target `--region`
+- Confirm AWS credentials are configured: `aws sts get-caller-identity`
+- Confirm the endpoint is `InService` in the AWS Console or via `aws sagemaker describe-endpoint --endpoint-name your-endpoint-name`
+- Check CloudWatch Logs for the SageMaker endpoint for server-side errors
 
-### Timeout Errors
+### No audio output
 
-- Increase `--duration` if the endpoint is slow
-- Reduce `--connections` to lower load
-- Check CloudWatch logs for the SageMaker endpoint
-
-### No Audio Output
-
-- Ensure you are using a valid Deepgram voice for the product you deployed; check the [Voices documentation](https://developers.deepgram.com/docs/tts-models)
-- Verify PyAudio installation: `brew install portaudio && pip install pyaudio`
+- Ensure the `--voice` is valid for the deployed TTS model — see the [Voices documentation](https://developers.deepgram.com/docs/tts-models)
 - Check system volume and speaker settings
 - Enable debug logging: `--log-level DEBUG`
