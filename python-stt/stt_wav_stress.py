@@ -95,6 +95,8 @@ class DeepgramSageMakerConnection:
         self.is_active = False
         self.response_task = None
         self.chunk_count = 0
+        self.errored = False
+        self.error_messages: list[str] = []
 
     async def start_session(self, sample_rate, model="nova-3", language="en", **kwargs):
         """
@@ -165,8 +167,19 @@ class DeepgramSageMakerConnection:
                 f"({len(audio_bytes)} bytes)"
             )
         except Exception as e:
-            logger.error(f"[Connection {self.connection_id}] Error sending audio chunk: {e}")
+            msg = str(e)
+            logger.error(f"[Connection {self.connection_id}] Error sending audio chunk: {msg}")
+            self.errored = True
+            self.error_messages.append(msg)
             self.is_active = False
+            # Close the input stream so the server closes the output stream,
+            # allowing _process_responses to exit via receive() returning None.
+            # Do not cancel response_task directly — awscrt futures raise
+            # InvalidStateError when cancelled while a body callback is in flight.
+            try:
+                await self.stream.input_stream.close()
+            except Exception:
+                pass
 
     async def _process_responses(self):
         """Process streaming responses from Deepgram."""
@@ -181,24 +194,16 @@ class DeepgramSageMakerConnection:
                 if result.value and result.value.bytes_:
                     self._handle_response(result.value.bytes_.decode('utf-8'))
 
-            logger.debug(f"[Connection {self.connection_id}] Draining remaining responses...")
-            drain_count = 0
-            while drain_count < 10:
-                try:
-                    result = await asyncio.wait_for(self.output_stream.receive(), timeout=0.5)
-                    if result is None:
-                        break
-                    if result.value and result.value.bytes_:
-                        drain_count += 1
-                        self._handle_response(result.value.bytes_.decode('utf-8'))
-                except asyncio.TimeoutError:
-                    break
 
         except Exception as e:
+            msg = _unwrap_streaming_error(e)
             logger.error(
-                f"[Connection {self.connection_id}] Error in response processor: {e}",
+                f"[Connection {self.connection_id}] Error in response processor: {msg}",
                 exc_info=True,
             )
+            self.errored = True
+            self.is_active = False
+            self.error_messages.append(msg)
 
     def _handle_response(self, raw: str):
         """Parse and print a streaming transcript response."""
@@ -209,6 +214,12 @@ class DeepgramSageMakerConnection:
             return
 
         if 'channel' not in parsed:
+            # Surface endpoint error messages (e.g. {"error": "...", "message": "..."})
+            err_msg = parsed.get('error') or parsed.get('message')
+            if err_msg:
+                self.errored = True
+                self.error_messages.append(str(err_msg))
+                logger.error(f"[Connection {self.connection_id}] Endpoint error: {err_msg}")
             return
 
         alternatives = parsed.get('channel', {}).get('alternatives', [])
@@ -223,34 +234,40 @@ class DeepgramSageMakerConnection:
         is_final = parsed.get('is_final', False)
         speech_final = parsed.get('speech_final', False)
 
-        if is_final and speech_final:
+        if is_final:
             print(f"[Conn {self.connection_id}] ✓ {transcript} ({confidence:.1%})")
         else:
             print(f"[Conn {self.connection_id}]   {transcript} [interim]")
 
     async def end_session(self):
         """Close the streaming session."""
-        if not self.is_active:
-            return
-
         logger.debug(f"[Connection {self.connection_id}] Ending session")
         self.is_active = False
 
         try:
-            await self.stream.input_stream.close()
+            await asyncio.wait_for(self.stream.input_stream.close(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"[Connection {self.connection_id}] Timeout closing input stream")
         except Exception as e:
             logger.error(f"[Connection {self.connection_id}] Error closing input stream: {e}")
 
         if self.response_task and not self.response_task.done():
-            try:
-                await asyncio.wait_for(self.response_task, timeout=15.0)
-            except asyncio.TimeoutError:
+            # Prefer asyncio.wait over wait_for to avoid cancelling the task
+            # during the wait — awscrt raises InvalidStateError when a future
+            # is cancelled while its C-level body callback is in flight.
+            done, _ = await asyncio.wait({self.response_task}, timeout=10.0)
+            if not done:
                 logger.warning(
-                    f"[Connection {self.connection_id}] Timeout waiting for final responses"
+                    f"[Connection {self.connection_id}] Timeout waiting for final responses; "
+                    "forcing task shutdown"
                 )
+                # Cancelling after timeout is unavoidable to prevent the process
+                # from hanging. awscrt may log an InvalidStateError internally.
                 self.response_task.cancel()
-            except asyncio.CancelledError:
-                pass
+                try:
+                    await self.response_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
         logger.info(
             f"[Connection {self.connection_id}] Session ended "
@@ -532,13 +549,19 @@ class BatchSTTClient:
         request_id: int,
         audio_bytes: bytes,
         custom_attributes: str,
+        stop_event: threading.Event,
     ) -> tuple[int, float, dict | None, Exception | None]:
         """
         Make a single InvokeEndpoint call on the calling thread.
 
         Uses a per-thread boto3 client so concurrent calls don't share connections.
+        Checks stop_event before starting; sets it on any error so remaining
+        pending threads abort without doing work.
         Returns (request_id, elapsed_seconds, parsed_response_or_None, error_or_None).
         """
+        if stop_event.is_set():
+            return request_id, 0.0, None, RuntimeError("Aborted due to prior error")
+
         sm_client = self._get_thread_client()
         start = time.monotonic()
         try:
@@ -556,10 +579,20 @@ class BatchSTTClient:
 
         except ClientError as e:
             elapsed = time.monotonic() - start
+            stop_event.set()
             code = e.response['Error']['Code']
             msg = e.response['Error']['Message']
             if code == 'ModelError':
-                inner = _unwrap_sagemaker_model_error(msg)
+                # Prefer OriginalMessage (raw container body) over the wrapped Error.Message
+                original = e.response.get('OriginalMessage', '')
+                if original:
+                    try:
+                        parsed = json.loads(original)
+                        inner = json.dumps(parsed, indent=2)
+                    except (json.JSONDecodeError, ValueError):
+                        inner = original
+                else:
+                    inner = _unwrap_sagemaker_model_error(msg)
                 err = RuntimeError(
                     f"Model returned an error [{code}]:\n{inner}"
                 )
@@ -572,6 +605,7 @@ class BatchSTTClient:
 
         except Exception as e:
             elapsed = time.monotonic() - start
+            stop_event.set()
             return request_id, elapsed, None, e
 
     def run(
@@ -593,15 +627,33 @@ class BatchSTTClient:
 
         audio_bytes = self.load_wav()
 
-        with concurrent.futures.ThreadPoolExecutor(
+        stop_event = threading.Event()
+        executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=concurrency,
             thread_name_prefix="batch-invoke",
-        ) as executor:
+        )
+        try:
             futures = {
-                executor.submit(self._invoke_once, i + 1, audio_bytes, custom_attributes): i + 1
+                executor.submit(self._invoke_once, i + 1, audio_bytes, custom_attributes, stop_event): i + 1
                 for i in range(num_requests)
             }
-            results = [future.result() for future in concurrent.futures.as_completed(futures)]
+            results = []
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    req_id = futures[future]
+                    logger.error(f"[Request {req_id}] Unexpected thread error: {e}")
+                    stop_event.set()
+                    results.append((req_id, 0.0, None, e))
+        except (KeyboardInterrupt, SystemExit):
+            logger.warning("Batch run interrupted — cancelling pending requests")
+            stop_event.set()
+            for f in futures:
+                f.cancel()
+            raise
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         return results
 
@@ -610,26 +662,90 @@ class BatchSTTClient:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _unwrap_streaming_error(exc: BaseException) -> str:
+    """
+    Extract the most informative message from a streaming exception.
+
+    Walks the exception's attribute set and cause chain looking for richer
+    detail than str(exc) alone provides.  Falls back to _unwrap_sagemaker_model_error
+    on the string representation when nothing better is found.
+    """
+    # Attributes that Smithy-generated SDK exceptions and awscrt errors expose
+    _DETAIL_ATTRS = ("message", "reason", "error_message", "detail", "body")
+
+    def _candidate(e: BaseException) -> str | None:
+        # Prefer dedicated message attributes over str()
+        for attr in _DETAIL_ATTRS:
+            val = getattr(e, attr, None)
+            if val and isinstance(val, str) and val.strip():
+                candidate = val.strip()
+                # Only use if it carries more info than the string form
+                if candidate not in str(e):
+                    return candidate
+        # awscrt errors expose a numeric code; pair it with the name if present
+        code = getattr(e, "code", None)
+        name = getattr(e, "name", None)
+        if code is not None or name is not None:
+            parts = []
+            if name:
+                parts.append(name)
+            if code is not None:
+                parts.append(f"code={code}")
+            suffix = f" [{', '.join(parts)}]"
+            return str(e) + suffix
+        return None
+
+    # Walk the cause chain collecting candidates
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        candidate = _candidate(current)
+        if candidate:
+            return _unwrap_sagemaker_model_error(candidate)
+        cause = current.__cause__ or (
+            current.__context__ if not current.__suppress_context__ else None
+        )
+        current = cause
+
+    return _unwrap_sagemaker_model_error(str(exc))
+
+
 def _unwrap_sagemaker_model_error(msg: str) -> str:
     """
-    Extract the inner model error message from a SageMaker ModelError string.
+    Extract the inner model error message from a SageMaker error string.
 
-    SageMaker wraps model errors in a message of the form:
+    Handles two formats:
+
+    Batch (ClientError / ModelError):
         Received client error (NNN) from primary with message "INNER". See ...
 
-    If the inner message is JSON, it is pretty-printed.  Falls back to
-    returning the original *msg* unchanged when the pattern is not matched.
+    Streaming (exception from awscrt / SageMaker runtime):
+        An error occurred while streaming ... primary. See https://... for more information.
+
+    For the batch format the inner message is extracted and pretty-printed if
+    it is JSON.  For the streaming format the CloudWatch boilerplate suffix is
+    stripped so only the actionable sentence is kept.  Falls back to returning
+    the original *msg* unchanged when neither pattern matches.
     """
     import re
+
+    # Batch: extract quoted inner message
     match = re.search(r'with message "(.+?)"\.\s*See ', msg, re.DOTALL)
-    if not match:
-        return msg
-    inner = match.group(1)
-    try:
-        parsed = json.loads(inner)
-        return json.dumps(parsed, indent=2)
-    except (json.JSONDecodeError, ValueError):
-        return inner
+    if match:
+        inner = match.group(1)
+        try:
+            parsed = json.loads(inner)
+            return json.dumps(parsed, indent=2)
+        except (json.JSONDecodeError, ValueError):
+            return inner
+
+    # Streaming: strip "See https://... for more information." boilerplate
+    cleaned = re.sub(r'\s*See https?://\S+ for more information\.?\s*$', '', msg, flags=re.DOTALL).strip()
+    if cleaned and cleaned != msg:
+        return cleaned
+
+    return msg
 
 
 def _parse_redact(value: str) -> list[str]:
@@ -826,13 +942,15 @@ async def run_stream(args) -> int:
 
     signal.signal(signal.SIGINT, signal_handler)
 
+    wall_start = time.monotonic()
+
     try:
         await client.initialize_connections(
             model=args.model,
             language=args.language,
             diarize=args.diarize,
             punctuate=args.punctuate,
-            interim_results=args.interim_results,
+            interim_results="true" if args.interim_results else "false",
             keywords=keywords_list,
             keyterms=keyterms_list,
             redact_entities=redact_list,
@@ -863,10 +981,36 @@ async def run_stream(args) -> int:
         return 1
     finally:
         await client.end_all_sessions()
+        wall_elapsed = time.monotonic() - wall_start
+
+        conns = client.connections
+        successful = [c for c in conns if not c.errored]
+        errored = [c for c in conns if c.errored]
+
+        # Aggregate error messages across all connections (deduplicated with counts)
+        all_errors: dict[str, int] = {}
+        for c in errored:
+            for msg in c.error_messages:
+                all_errors[msg] = all_errors.get(msg, 0) + 1
+
         print("\n" + "=" * 60)
+        print("STREAM SUMMARY")
+        print("=" * 60)
+        print(f"Total connections:  {len(conns)}")
+        print(f"Successful:         {len(successful)}")
+        print(f"Errored:            {len(errored)}")
+        print(f"Total wall time:    {wall_elapsed:.2f}s")
+
+        if all_errors:
+            print("\nErrors:")
+            for msg, count in all_errors.items():
+                prefix = f"  (x{count}) " if count > 1 else "  "
+                print(f"{prefix}{msg}")
+
+        print("=" * 60)
 
     logger.info("Transcription complete")
-    return 0
+    return 0 if not any(c.errored for c in client.connections) else 1
 
 
 async def run_batch(args) -> int:
@@ -1034,9 +1178,9 @@ async def main() -> int:
     )
     stream_parser.add_argument(
         "--interim-results",
-        default="true",
-        choices=["true", "false"],
-        help="Enable interim (partial) results (default: true)",
+        action="store_true",
+        default=False,
+        help="Enable interim (partial) results (default: disabled)",
     )
     stream_parser.add_argument(
         "--loop",

@@ -4,12 +4,16 @@ requires-python = ">=3.12"
 
 [[package]]
 name = "aws-sdk-sagemaker-runtime-http2"
-version = "0.3.0"
-source = { git = "https://github.com/awslabs/aws-sdk-python?subdirectory=clients%2Faws-sdk-sagemaker-runtime-http2#1983248894b9edfa7ba0337af080977fa06dca80" }
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "smithy-aws-core", extra = ["eventstream", "json"] },
     { name = "smithy-core" },
     { name = "smithy-http", extra = ["awscrt"] },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/55/52/655ab732fe8c974ab7b8c6f8c695bc0ae00ccdf952f70997b4802f6e8143/aws_sdk_sagemaker_runtime_http2-0.4.0.tar.gz", hash = "sha256:fa644aa80fa881b7491b6d7a57cf75665b4ec1f0310e1dbeb0296bf95fd262ea", size = 26699, upload-time = "2026-02-24T18:55:28.67Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/cc/95cc6a61885dcc2cbc34167bed9cfd3183cf0a0a79b0e06388d8f4a78b86/aws_sdk_sagemaker_runtime_http2-0.4.0-py3-none-any.whl", hash = "sha256:be1e3415047058a655f682cb97f2ba7cadd46a30100bb8f2ef1b1c2c8d41204b", size = 21802, upload-time = "2026-02-24T18:55:27.804Z" },
 ]
 
 [[package]]
@@ -45,30 +49,30 @@ wheels = [
 
 [[package]]
 name = "boto3"
-version = "1.42.34"
+version = "1.42.78"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore" },
     { name = "jmespath" },
     { name = "s3transfer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d0/69/c0d4cc77add3cdf66f8573555d71dc23ba32dfe77df40e1c91385f7a9bdc/boto3-1.42.34.tar.gz", hash = "sha256:75d7443c81a029283442fad138629be1eefaa3e6d430c28118a0f4cdbd57855d", size = 112876, upload-time = "2026-01-23T20:29:47.213Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/2b/ebdad075934cf6bb78bf81fe31d83339bcd804ad6c856f7341376cbc88b6/boto3-1.42.78.tar.gz", hash = "sha256:cef2ebdb9be5c0e96822f8d3941ac4b816c90a5737a7ffb901d664c808964b63", size = 112789, upload-time = "2026-03-27T19:28:07.58Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b8/55/25c543864abc270f5fdd7814fa7b69fd23de1c40fb3d7993f4b6391f8d3b/boto3-1.42.34-py3-none-any.whl", hash = "sha256:db3fb539e3f806b911ec4ca991f2f8bff333c5f0b87132a82e28b521fc5ec164", size = 140574, upload-time = "2026-01-23T20:29:45.916Z" },
+    { url = "https://files.pythonhosted.org/packages/57/bb/1f6dade1f1e86858bef7bd332bc8106c445f2dbabec7b32ab5d7d118c9b6/boto3-1.42.78-py3-none-any.whl", hash = "sha256:480a34a077484a5ca60124dfd150ba3ea6517fc89963a679e45b30c6db614d26", size = 140556, upload-time = "2026-03-27T19:28:06.125Z" },
 ]
 
 [[package]]
 name = "botocore"
-version = "1.42.34"
+version = "1.42.78"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jmespath" },
     { name = "python-dateutil" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fd/f0/5702b704844e8920e01ce865cde0da574827163fbd7c0207d351ff6eea2c/botocore-1.42.34.tar.gz", hash = "sha256:92e44747da7890270d8dcc494ecc61fc315438440c55e00dc37a57d402b1bb66", size = 14907713, upload-time = "2026-01-23T20:29:38.193Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/67/8e/cdb34c8ca71216d214e049ada2148ee08bcda12b1ac72af3a720dea300ff/botocore-1.42.78.tar.gz", hash = "sha256:61cbd49728e23f68cfd945406ab40044d49abed143362f7ffa4a4f4bd4311791", size = 15023592, upload-time = "2026-03-27T19:27:57.122Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/29/99/226fb4b2d141d7ac59465e3cdd2ca3a9a2917d85e1a3160884a78b097bbb/botocore-1.42.34-py3-none-any.whl", hash = "sha256:94099b5d09d0c4bfa6414fb3cffd54275ce6e51d7ba016f17a0e79f9274f68f7", size = 14579956, upload-time = "2026-01-23T20:29:29.038Z" },
+    { url = "https://files.pythonhosted.org/packages/54/72/94bba1a375d45c685b00e051b56142359547837086a83861d76f6aec26f4/botocore-1.42.78-py3-none-any.whl", hash = "sha256:038ab63c7f898e8b5db58cb6a45e4da56c31dd984e7e995839a3540c735564ea", size = 14701729, upload-time = "2026-03-27T19:27:54.05Z" },
 ]
 
 [[package]]
@@ -179,7 +183,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aws-sdk-sagemaker-runtime-http2", git = "https://github.com/awslabs/aws-sdk-python?subdirectory=clients%2Faws-sdk-sagemaker-runtime-http2" },
+    { name = "aws-sdk-sagemaker-runtime-http2", specifier = "==0.4.0" },
     { name = "boto3", specifier = ">=1.42.34" },
     { name = "pyaudio", specifier = ">=0.2.14" },
 ]
@@ -207,16 +211,16 @@ wheels = [
 
 [[package]]
 name = "smithy-aws-core"
-version = "0.3.0"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aws-sdk-signers" },
     { name = "smithy-core" },
     { name = "smithy-http" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1f/3c/6c9acfeabe9d0c682d1dea57242c2e064beec688936ff3b586d00517a9c1/smithy_aws_core-0.3.0.tar.gz", hash = "sha256:514bc9f26ae7d3d2c96a6e8ce3e8a6fdffaf4abb276d0c7b099be45e395aced3", size = 11372, upload-time = "2026-01-02T17:42:04.768Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/84/14/0f00836c3d6d2309f4090df98b918ea07980cea97f01c1254b6d4e5cc9f8/smithy_aws_core-0.4.0.tar.gz", hash = "sha256:579caef8b2519e2593006ded4e6a369f99387d69f06e857fffda8fc4ad1eb11d", size = 11431, upload-time = "2026-02-24T18:55:22.066Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/93/f5/418440394ee4892e9d66b25baac7051ae6c355cb283e5b370acf89bfc658/smithy_aws_core-0.3.0-py3-none-any.whl", hash = "sha256:ceb07135e7a2445a153a83128a16c3e4fd58bbd1d1b9c82bb482e1e78eec6f71", size = 18966, upload-time = "2026-01-02T17:42:03.981Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/87/4a8d4e14357abb8a207cc8d4bf47d11ebc9792ca2d20a940231576714287/smithy_aws_core-0.4.0-py3-none-any.whl", hash = "sha256:004164599a0a2911ea80889dd2c954fd7da17ff3e8d208fb732b1e778a1450f1", size = 18965, upload-time = "2026-02-24T18:55:21.181Z" },
 ]
 
 [package.optional-dependencies]
