@@ -365,28 +365,88 @@ class MultiConnectionWAVClient:
         self.client = SageMakerRuntimeHTTP2Client(config=config)
         logger.info("SageMaker streaming client initialized")
 
-    async def initialize_connections(self, model="nova-3", language="en", **kwargs):
-        """Start all bidirectional streaming connections in parallel."""
+    async def initialize_connections(
+        self,
+        batch_size: int = 0,
+        batch_delay: float = 0.0,
+        model="nova-3",
+        language="en",
+        loop: bool = False,
+        **kwargs,
+    ) -> list[asyncio.Task]:
+        """
+        Open streaming connections in batches and immediately start streaming
+        the WAV file to each connection as soon as its batch is ready.
+
+        Args:
+            batch_size: Connections to open per batch (0 = all at once).
+            batch_delay: Seconds to wait between batches.
+            model: Deepgram model.
+            language: Language code.
+            loop: Whether each connection should loop the WAV file.
+            **kwargs: Additional Deepgram query parameters.
+
+        Returns:
+            List of asyncio Tasks, one per connection, each streaming the
+            full WAV file independently.
+        """
         if not self.client:
             self._initialize_client()
 
-        logger.info(f"Initializing {self.num_connections} connection(s)...")
-        for i in range(self.num_connections):
-            conn = DeepgramSageMakerConnection(i + 1, self.client, self.endpoint_name)
-            self.connections.append(conn)
+        effective_batch = batch_size if batch_size > 0 else self.num_connections
+        num_batches = (self.num_connections + effective_batch - 1) // effective_batch
+        logger.info(
+            f"Initializing {self.num_connections} connection(s) "
+            f"in {num_batches} batch(es) of up to {effective_batch} "
+            f"(delay {batch_delay}s between batches)..."
+        )
 
-        await asyncio.gather(*[
-            conn.start_session(self.sample_rate, model=model, language=language, **kwargs)
-            for conn in self.connections
-        ])
-
+        streaming_tasks: list[asyncio.Task] = []
         self.is_active = True
-        logger.info(f"All {self.num_connections} connection(s) started")
 
-    async def stream_wav_audio(self, loop=False):
+        for batch_start in range(0, self.num_connections, effective_batch):
+            batch_end = min(batch_start + effective_batch, self.num_connections)
+            batch_num = batch_start // effective_batch + 1
+            batch_conns = []
+
+            for i in range(batch_start, batch_end):
+                conn = DeepgramSageMakerConnection(i + 1, self.client, self.endpoint_name)
+                self.connections.append(conn)
+                batch_conns.append(conn)
+
+            logger.info(
+                f"Opening batch {batch_num}/{num_batches}: "
+                f"connection(s) {batch_start + 1}–{batch_end}..."
+            )
+            await asyncio.gather(*[
+                conn.start_session(self.sample_rate, model=model, language=language, **kwargs)
+                for conn in batch_conns
+            ])
+
+            # Immediately start streaming for each connection in this batch.
+            for conn in batch_conns:
+                task = asyncio.create_task(
+                    self._stream_wav_to_connection(conn, loop=loop),
+                    name=f"stream-conn-{conn.connection_id}",
+                )
+                streaming_tasks.append(task)
+
+            if batch_end < self.num_connections and batch_delay > 0:
+                logger.info(
+                    f"Batch {batch_num} started; "
+                    f"waiting {batch_delay}s before next batch..."
+                )
+                await asyncio.sleep(batch_delay)
+
+        logger.info(f"All {self.num_connections} connection(s) started")
+        return streaming_tasks
+
+    async def _stream_wav_to_connection(
+        self, conn: DeepgramSageMakerConnection, loop: bool = False
+    ):
         """
-        Read the WAV file and broadcast audio chunks to all connections at
-        real-time speed, paced by the file's sample rate.
+        Stream the full WAV file to a single connection, paced to real-time
+        speed.  Loops the file if loop=True; otherwise plays it once.
         """
         bytes_per_frame = self.sample_width * self.channels
         frames_per_chunk = CHUNK_SIZE // bytes_per_frame
@@ -394,37 +454,38 @@ class MultiConnectionWAVClient:
 
         play_count = 0
         total_chunks = 0
+        stream_start = time.monotonic()
 
-        while self.is_active:
+        while self.is_active and conn.is_active:
             wf = self._open_wav()
             play_count += 1
-            logger.info(f"Streaming WAV file (pass {play_count})...")
-            chunk_start = time.monotonic()
+            logger.debug(
+                f"[Connection {conn.connection_id}] Streaming WAV (pass {play_count})..."
+            )
 
-            while self.is_active:
-                raw = wf.readframes(frames_per_chunk)
-                if not raw:
-                    break
+            try:
+                while self.is_active and conn.is_active:
+                    raw = wf.readframes(frames_per_chunk)
+                    if not raw:
+                        break
 
-                active = [c for c in self.connections if c.is_active]
-                if not active:
-                    logger.warning("All connections have failed")
-                    self.is_active = False
-                    break
+                    await conn.send_audio_chunk(raw)
+                    total_chunks += 1
 
-                await asyncio.gather(*[c.send_audio_chunk(raw) for c in active])
-                total_chunks += 1
+                    elapsed = time.monotonic() - stream_start
+                    sleep_time = total_chunks * chunk_duration - elapsed
+                    if sleep_time > 0:
+                        await asyncio.sleep(sleep_time)
+            finally:
+                wf.close()
 
-                elapsed = time.monotonic() - chunk_start
-                sleep_time = total_chunks * chunk_duration - elapsed
-                if sleep_time > 0:
-                    await asyncio.sleep(sleep_time)
-
-            wf.close()
             if not loop:
                 break
 
-        logger.info(f"Finished streaming: {play_count} pass(es), {total_chunks} chunks total")
+        logger.info(
+            f"[Connection {conn.connection_id}] Finished streaming WAV "
+            f"({play_count} pass(es), {total_chunks} chunks)"
+        )
 
     async def end_all_sessions(self):
         """Close all streaming sessions."""
@@ -895,6 +956,11 @@ async def run_stream(args) -> int:
         print("ERROR: --connections must be a positive integer (minimum 1)")
         return 1
 
+    batch_size = args.batch_size if args.batch_size > 0 else args.connections
+    if batch_size < 1:
+        print("ERROR: --batch-size must be a positive integer (minimum 1)")
+        return 1
+
     client = MultiConnectionWAVClient(
         endpoint_name=args.endpoint_name,
         wav_path=args.file,
@@ -911,29 +977,38 @@ async def run_stream(args) -> int:
 
     limit_str = (
         f"{args.duration}s" if args.duration
-        else ("until file ends (looping)" if args.loop else "until file ends or Ctrl+C")
+        else ("until file ends (looping)" if args.loop else "until file ends")
+    )
+
+    num_batches = (args.connections + batch_size - 1) // batch_size
+    batch_str = (
+        f"{batch_size} per batch × {num_batches} batch(es)"
+        if num_batches > 1
+        else f"{args.connections} (single batch)"
     )
 
     print("=" * 60)
     print("Deepgram SageMaker WAV Streaming Client")
     print("=" * 60)
-    print(f"Endpoint:    {args.endpoint_name}")
-    print(f"WAV File:    {args.file}")
-    print(f"Duration:    {client.duration_seconds:.2f}s")
-    print(f"Sample Rate: {client.sample_rate} Hz")
-    print(f"Channels:    {client.channels}")
-    print(f"Connections: {args.connections}")
-    print(f"Model:       {args.model}")
-    print(f"Language:    {args.language}")
-    print(f"Region:      {args.region}")
-    print(f"Loop:        {'yes' if args.loop else 'no'}")
-    print(f"Limit:       {limit_str}")
+    print(f"Endpoint:     {args.endpoint_name}")
+    print(f"WAV File:     {args.file}")
+    print(f"Duration:     {client.duration_seconds:.2f}s")
+    print(f"Sample Rate:  {client.sample_rate} Hz")
+    print(f"Channels:     {client.channels}")
+    print(f"Connections:  {args.connections} ({batch_str})")
+    if num_batches > 1:
+        print(f"Batch Delay:  {args.batch_delay}s")
+    print(f"Model:        {args.model}")
+    print(f"Language:     {args.language}")
+    print(f"Region:       {args.region}")
+    print(f"Loop:         {'yes' if args.loop else 'no'}")
+    print(f"Limit:        {limit_str}")
     if redact_list:
-        print(f"Redact:      {', '.join(redact_list)}")
+        print(f"Redact:       {', '.join(redact_list)}")
     if keywords_list:
-        print(f"Keywords:    {', '.join(keywords_list)}")
+        print(f"Keywords:     {', '.join(keywords_list)}")
     if keyterms_list:
-        print(f"Keyterms:    {', '.join(keyterms_list)}")
+        print(f"Keyterms:     {', '.join(keyterms_list)}")
     print("=" * 60)
 
     def signal_handler(sig, frame):
@@ -945,7 +1020,9 @@ async def run_stream(args) -> int:
     wall_start = time.monotonic()
 
     try:
-        await client.initialize_connections(
+        streaming_tasks = await client.initialize_connections(
+            batch_size=batch_size,
+            batch_delay=args.batch_delay,
             model=args.model,
             language=args.language,
             diarize=args.diarize,
@@ -954,6 +1031,7 @@ async def run_stream(args) -> int:
             keywords=keywords_list,
             keyterms=keyterms_list,
             redact_entities=redact_list,
+            loop=args.loop,
         )
 
         print("\n" + "=" * 60)
@@ -964,15 +1042,19 @@ async def run_stream(args) -> int:
             print("   (Press Ctrl+C to stop)")
         print("=" * 60 + "\n")
 
-        stream_coro = client.stream_wav_audio(loop=args.loop)
+        all_streaming = asyncio.gather(*streaming_tasks, return_exceptions=True)
         if args.duration:
             try:
-                await asyncio.wait_for(stream_coro, timeout=args.duration)
+                await asyncio.wait_for(all_streaming, timeout=args.duration)
             except asyncio.TimeoutError:
                 print(f"\nDuration of {args.duration}s reached, stopping...")
                 client.is_active = False
+                for task in streaming_tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*streaming_tasks, return_exceptions=True)
         else:
-            await stream_coro
+            await all_streaming
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
@@ -1163,7 +1245,25 @@ async def main() -> int:
         "--connections",
         type=int,
         default=1,
-        help="Number of simultaneous streaming connections (default: 1)",
+        help="Total number of simultaneous streaming connections (default: 1)",
+    )
+    stream_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Number of new connections to open per batch (default: open all at once). "
+            "Streaming begins immediately when each batch opens. "
+            "Use with --batch-delay to ramp up load gradually."
+        ),
+    )
+    stream_parser.add_argument(
+        "--batch-delay",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="Seconds to wait between opening connection batches (default: 0)",
     )
     stream_parser.add_argument(
         "--keywords",

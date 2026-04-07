@@ -168,6 +168,13 @@ uv run stt_wav_stress.py stream your-endpoint-name --file audio.wav \
   --connections 10 --loop --duration 300
 ```
 
+**Gradual ramp-up (open 5 connections at a time, 3 seconds apart):**
+
+```bash
+uv run stt_wav_stress.py stream your-endpoint-name --file audio.wav \
+  --connections 20 --batch-size 5 --batch-delay 3
+```
+
 **With speaker diarization:**
 
 ```bash
@@ -204,7 +211,9 @@ uv run stt_wav_stress.py stream your-endpoint-name --file audio.wav \
 
 ```bash
 uv run stt_wav_stress.py stream your-endpoint-name --file audio.wav \
-  --connections 3 \
+  --connections 20 \
+  --batch-size 5 \
+  --batch-delay 3 \
   --model nova-3 \
   --language en \
   --diarize true \
@@ -223,7 +232,9 @@ uv run stt_wav_stress.py stream your-endpoint-name --file audio.wav \
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--file WAV_FILE` | Path to a 16-bit PCM WAV file (required) | — |
-| `--connections N` | Number of simultaneous streaming connections | `1` |
+| `--connections N` | Total number of simultaneous streaming connections | `1` |
+| `--batch-size N` | Connections to open per batch; streaming begins immediately for each batch | all at once |
+| `--batch-delay SECONDS` | Seconds to wait between opening connection batches | `0` |
 | `--model MODEL` | Deepgram model | `nova-3` |
 | `--language LANG` | Language code | `en` |
 | `--diarize true\|false` | Enable speaker diarization | `false` |
