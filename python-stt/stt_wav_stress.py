@@ -24,6 +24,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import resource
 import signal
 import statistics
 import sys
@@ -180,8 +181,6 @@ class DeepgramSageMakerConnection:
         self.output_stream = output[1]
 
         self.response_task = asyncio.create_task(self._process_responses())
-        await asyncio.sleep(0.1)
-
         logger.info(f"[Connection {self.connection_id}] Session started")
 
     async def send_audio_chunk(self, audio_bytes):
@@ -328,8 +327,6 @@ class MultiConnectionWAVClient:
         self.connections = []
         self.is_active = False
         self._init_complete = False
-        self._stdout_lock = threading.Lock()
-        self._use_bar = False
 
         self.sample_rate = None
         self.channels = None
@@ -396,11 +393,12 @@ class MultiConnectionWAVClient:
 
         self._credentials_ready = True
 
-    # HTTP/2 servers negotiate a MAX_CONCURRENT_STREAMS limit per TCP
-    # connection.  SageMaker negotiates MAX_CONCURRENT_STREAMS = 2, so
-    # we create many underlying CRT clients (each with its own TCP
-    # connection) to stay within this limit.
-    _MAX_STREAMS_PER_CONNECTION = 2
+    # Each bidirectional stream needs its own TCP connection so that
+    # audio data flows immediately without being queued behind other
+    # streams' data in the CRT's HTTP/2 multiplexer.  Sharing even
+    # 2 streams per connection causes the CRT to starve one of them,
+    # triggering Deepgram's 12-second idle timeout (NET-0001).
+    _MAX_STREAMS_PER_CONNECTION = 1
 
     def _create_one_client(self, eventloop: _AWSCRTEventLoop) -> SageMakerRuntimeHTTP2Client:
         """Create a single SageMaker HTTP/2 client with its own CRT transport."""
@@ -417,35 +415,33 @@ class MultiConnectionWAVClient:
         return SageMakerRuntimeHTTP2Client(config=config)
 
     def _initialize_clients(self):
-        """Create a pool of SageMaker HTTP/2 clients.
+        """Prepare the shared CRT event loop and credential environment.
 
-        Each CRT transport caches a single TCP connection per host, and HTTP/2
-        servers enforce a MAX_CONCURRENT_STREAMS limit per connection (~20 on
-        SageMaker).  We create enough clients so that streams are distributed
-        across multiple TCP connections.
-
-        All clients share a single CRT event loop group to avoid spawning
-        excessive I/O threads.
+        Clients are created lazily (one per connection) via
+        ``_get_client()`` so that hundreds of CRT transports aren't
+        allocated upfront.
         """
         self._ensure_credentials()
 
         # Single shared event loop (one I/O thread per CPU core).
-        eventloop = _AWSCRTEventLoop.__new__(_AWSCRTEventLoop)
+        self._eventloop = _AWSCRTEventLoop.__new__(_AWSCRTEventLoop)
         elg = crt_io.EventLoopGroup(0)
         host_resolver = crt_io.DefaultHostResolver(elg)
-        eventloop.bootstrap = crt_io.ClientBootstrap(elg, host_resolver)
+        self._eventloop.bootstrap = crt_io.ClientBootstrap(elg, host_resolver)
 
-        num_clients = max(
-            1,
-            (self.num_connections + self._MAX_STREAMS_PER_CONNECTION - 1)
-            // self._MAX_STREAMS_PER_CONNECTION,
-        )
-        self._clients = [self._create_one_client(eventloop) for _ in range(num_clients)]
         logger.info(
-            f"Initialized {num_clients} SageMaker HTTP/2 client(s) "
-            f"(up to {self._MAX_STREAMS_PER_CONNECTION} streams each, "
-            f"multi-threaded CRT event loop)"
+            f"CRT event loop ready "
+            f"(clients created lazily, 1 per connection)"
         )
+
+    def _get_client(self, connection_index: int) -> SageMakerRuntimeHTTP2Client:
+        """Return a client for the given connection, creating it lazily."""
+        # With _MAX_STREAMS_PER_CONNECTION = 1, each connection gets
+        # its own client.  Reuse clients when the ratio allows sharing.
+        client_index = connection_index // self._MAX_STREAMS_PER_CONNECTION
+        while len(self._clients) <= client_index:
+            self._clients.append(self._create_one_client(self._eventloop))
+        return self._clients[client_index]
 
     async def initialize_connections(
         self,
@@ -486,40 +482,26 @@ class MultiConnectionWAVClient:
         streaming_tasks: list[asyncio.Task] = []
         self.is_active = True
         max_retries = 5
+        # Limit concurrent connection setups so the CRT isn't overwhelmed
+        # with hundreds of simultaneous TCP handshakes, while still
+        # allowing each connection to stream immediately after opening.
+        setup_sem = asyncio.Semaphore(effective_batch)
 
-        try:
-            for batch_start in range(0, self.num_connections, effective_batch):
-                if not self.is_active:
-                    break
-                batch_end = min(batch_start + effective_batch, self.num_connections)
-                batch_num = batch_start // effective_batch + 1
-                batch_conns = []
+        async def _open_and_stream(conn: DeepgramSageMakerConnection):
+            """Open one connection and start streaming immediately.
 
-                for i in range(batch_start, batch_end):
-                    client = self._clients[i % len(self._clients)]
-                    conn = DeepgramSageMakerConnection(
-                        i + 1, client, self.endpoint_name,
-                        write_fn=self._safe_print,
-                    )
-                    self.connections.append(conn)
-                    batch_conns.append(conn)
-
-                logger.info(
-                    f"Opening batch {batch_num}/{num_batches}: "
-                    f"connection(s) {batch_start + 1}–{batch_end}..."
-                )
-
-                # Retry with exponential backoff on throttling / timeout.
+            The semaphore gates connection setup so only ``batch_size``
+            sessions open concurrently, but once a session is open it
+            releases the semaphore and starts streaming right away —
+            no waiting for sibling connections.
+            """
+            async with setup_sem:
                 for attempt in range(max_retries):
                     try:
-                        await asyncio.gather(*[
-                            conn.start_session(
-                                self.sample_rate, model=model,
-                                language=language, **kwargs,
-                            )
-                            for conn in batch_conns
-                            if not conn.is_active
-                        ])
+                        await conn.start_session(
+                            self.sample_rate, model=model,
+                            language=language, **kwargs,
+                        )
                         break
                     except Exception as exc:
                         is_retryable = (
@@ -529,26 +511,58 @@ class MultiConnectionWAVClient:
                         if is_retryable and attempt < max_retries - 1:
                             wait = 2 ** attempt
                             logger.warning(
-                                f"Batch {batch_num} failed ({type(exc).__name__}), "
-                                f"retrying in {wait}s (attempt {attempt + 1}/{max_retries})..."
+                                f"[Connection {conn.connection_id}] "
+                                f"Failed ({type(exc).__name__}), "
+                                f"retrying in {wait}s "
+                                f"(attempt {attempt + 1}/{max_retries})..."
                             )
                             await asyncio.sleep(wait)
                         else:
-                            raise
+                            logger.error(
+                                f"[Connection {conn.connection_id}] "
+                                f"Failed to open: {exc}"
+                            )
+                            conn.errored = True
+                            conn.error_messages.append(str(exc))
+                            return
+            # Semaphore released — stream immediately.
+            try:
+                await self._stream_wav_to_connection(conn, loop=loop)
+            except Exception as exc:
+                logger.error(
+                    f"[Connection {conn.connection_id}] "
+                    f"Streaming failed: {exc}"
+                )
+                conn.errored = True
+                conn.error_messages.append(str(exc))
 
-                # Immediately start streaming for each connection in this batch.
-                for conn in batch_conns:
+        try:
+            for batch_start in range(0, self.num_connections, effective_batch):
+                if not self.is_active:
+                    break
+                batch_end = min(batch_start + effective_batch, self.num_connections)
+                batch_num = batch_start // effective_batch + 1
+
+                for i in range(batch_start, batch_end):
+                    client = self._get_client(i)
+                    conn = DeepgramSageMakerConnection(
+                        i + 1, client, self.endpoint_name,
+                        write_fn=self._safe_print,
+                    )
+                    self.connections.append(conn)
+
                     task = asyncio.create_task(
-                        self._stream_wav_to_connection(conn, loop=loop),
+                        _open_and_stream(conn),
                         name=f"stream-conn-{conn.connection_id}",
                     )
                     streaming_tasks.append(task)
 
+                logger.info(
+                    f"Opening batch {batch_num}/{num_batches}: "
+                    f"connection(s) {batch_start + 1}–{batch_end}..."
+                )
+
                 if batch_end < self.num_connections and batch_delay > 0:
-                    logger.info(
-                        f"Batch {batch_num} started; "
-                        f"waiting {batch_delay}s before next batch..."
-                    )
                     await asyncio.sleep(batch_delay)
         except Exception:
             # Cancel and await any streaming tasks already launched by
@@ -561,7 +575,7 @@ class MultiConnectionWAVClient:
             raise
 
         self._init_complete = True
-        logger.info(f"All {self.num_connections} connection(s) started")
+        logger.info(f"All {self.num_connections} connection task(s) launched")
         return streaming_tasks
 
     async def _stream_wav_to_connection(
@@ -630,10 +644,14 @@ class MultiConnectionWAVClient:
 
     async def _run_status_dashboard(self, interval: float = 2.0):
         """
-        Maintain a live status bar at the bottom of the terminal.
+        Show live status in the terminal title bar.
 
-        On TTY terminals the bottom line is reserved via a VT100 scroll
-        region so transcripts scroll above it while the bar stays fixed.
+        Using the terminal title (OSC escape ``\\033]0;…\\007``) avoids all
+        interleaving issues with scroll regions, cursor positioning, and
+        concurrent stdout/stderr writes.  The title bar is updated
+        independently of the main output area and can never be overwritten
+        by transcript lines or log messages.
+
         Falls back to periodic printed lines when stdout is not a TTY.
         """
         start = time.monotonic()
@@ -646,22 +664,7 @@ class MultiConnectionWAVClient:
         frames_per_chunk = CHUNK_SIZE // bytes_per_frame
         chunk_duration = frames_per_chunk / self.sample_rate
 
-        # Detect TTY for fixed bar vs. fallback periodic lines.
         is_tty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
-        rows = 0
-        if is_tty:
-            try:
-                _, rows = os.get_terminal_size()
-            except OSError:
-                is_tty = False
-        use_bar = is_tty and rows > 5
-        self._use_bar = use_bar
-
-        if use_bar:
-            # Reserve the last line for the status bar by constraining the
-            # scroll region to rows 1..(rows-1).  Save/restore the cursor
-            # so subsequent output continues where it left off.
-            os.write(sys.stdout.fileno(), f"\033[s\033[1;{rows - 1}r\033[u".encode())
 
         def _format_status() -> str:
             elapsed = time.monotonic() - start
@@ -696,25 +699,16 @@ class MultiConnectionWAVClient:
             err_part = f", {errored} err" if errored else ""
 
             return (
-                f" [{time_str}] {phase}{err_part}"
+                f"[{time_str}] {phase}{err_part}"
                 f" | {total_transcripts} transcripts"
-                f" | {audio_str} audio "
+                f" | {audio_str} audio"
             )
 
         def _draw(text: str):
-            if use_bar:
-                # Single atomic write so cursor-positioning sequences
-                # cannot be split by interleaved stderr/transcript output.
-                os.write(
-                    sys.stdout.fileno(),
-                    (
-                        f"\033[s"                # save cursor
-                        f"\033[{rows};1H"        # move to status line
-                        f"\033[7m{text}\033[K"   # reverse-video + text + clear rest
-                        f"\033[0m"               # reset attributes
-                        f"\033[u"                # restore cursor
-                    ).encode(),
-                )
+            if is_tty:
+                # Set terminal title — completely independent of the
+                # scrollback area, immune to interleaving.
+                os.write(sys.stdout.fileno(), f"\033]0;{text}\007".encode())
             else:
                 os.write(sys.stdout.fileno(), f"---{text}---\n".encode())
 
@@ -726,16 +720,9 @@ class MultiConnectionWAVClient:
                     break
                 _draw(_format_status())
         finally:
-            if use_bar:
-                # Clear the status bar and reset the scroll region so the
-                # summary prints normally below the transcript output.
-                os.write(
-                    sys.stdout.fileno(),
-                    (
-                        f"\033[{rows};1H\033[2K"  # clear status line
-                        f"\033[r"                  # reset scroll region
-                    ).encode(),
-                )
+            if is_tty:
+                # Reset title to empty.
+                os.write(sys.stdout.fileno(), b"\033]0;\007")
 
     async def end_all_sessions(self):
         """Close all streaming sessions."""
@@ -1186,6 +1173,13 @@ def _add_common_args(parser: argparse.ArgumentParser):
 # ---------------------------------------------------------------------------
 
 async def run_stream(args) -> int:
+    # Ensure we have enough file descriptors for many TCP connections.
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    desired = max(soft, min(hard, 8192))
+    if soft < desired:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
+        logger.debug(f"Raised fd limit from {soft} to {desired}")
+
     keywords_list = []
     if args.keywords:
         for kw in args.keywords.split(','):
@@ -1615,4 +1609,16 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    # Suppress noisy CRT InvalidStateError when _on_complete fires on
+    # an already-cancelled future during connection timeout/retry.
+    _default_unraisablehook = sys.unraisablehook
+
+    def _quiet_unraisablehook(args):
+        if args.exc_type is not None and issubclass(args.exc_type, InvalidStateError):
+            return
+        _default_unraisablehook(args)
+
+    from concurrent.futures._base import InvalidStateError
+    sys.unraisablehook = _quiet_unraisablehook
+
     sys.exit(asyncio.run(main()))
