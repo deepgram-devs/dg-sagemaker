@@ -95,6 +95,7 @@ class DeepgramSageMakerConnection:
         self.is_active = False
         self.response_task = None
         self.chunk_count = 0
+        self.transcript_count = 0
         self.errored = False
         self.error_messages: list[str] = []
 
@@ -404,39 +405,49 @@ class MultiConnectionWAVClient:
         streaming_tasks: list[asyncio.Task] = []
         self.is_active = True
 
-        for batch_start in range(0, self.num_connections, effective_batch):
-            batch_end = min(batch_start + effective_batch, self.num_connections)
-            batch_num = batch_start // effective_batch + 1
-            batch_conns = []
+        try:
+            for batch_start in range(0, self.num_connections, effective_batch):
+                batch_end = min(batch_start + effective_batch, self.num_connections)
+                batch_num = batch_start // effective_batch + 1
+                batch_conns = []
 
-            for i in range(batch_start, batch_end):
-                conn = DeepgramSageMakerConnection(i + 1, self.client, self.endpoint_name)
-                self.connections.append(conn)
-                batch_conns.append(conn)
+                for i in range(batch_start, batch_end):
+                    conn = DeepgramSageMakerConnection(i + 1, self.client, self.endpoint_name)
+                    self.connections.append(conn)
+                    batch_conns.append(conn)
 
-            logger.info(
-                f"Opening batch {batch_num}/{num_batches}: "
-                f"connection(s) {batch_start + 1}–{batch_end}..."
-            )
-            await asyncio.gather(*[
-                conn.start_session(self.sample_rate, model=model, language=language, **kwargs)
-                for conn in batch_conns
-            ])
-
-            # Immediately start streaming for each connection in this batch.
-            for conn in batch_conns:
-                task = asyncio.create_task(
-                    self._stream_wav_to_connection(conn, loop=loop),
-                    name=f"stream-conn-{conn.connection_id}",
-                )
-                streaming_tasks.append(task)
-
-            if batch_end < self.num_connections and batch_delay > 0:
                 logger.info(
-                    f"Batch {batch_num} started; "
-                    f"waiting {batch_delay}s before next batch..."
+                    f"Opening batch {batch_num}/{num_batches}: "
+                    f"connection(s) {batch_start + 1}–{batch_end}..."
                 )
-                await asyncio.sleep(batch_delay)
+                await asyncio.gather(*[
+                    conn.start_session(self.sample_rate, model=model, language=language, **kwargs)
+                    for conn in batch_conns
+                ])
+
+                # Immediately start streaming for each connection in this batch.
+                for conn in batch_conns:
+                    task = asyncio.create_task(
+                        self._stream_wav_to_connection(conn, loop=loop),
+                        name=f"stream-conn-{conn.connection_id}",
+                    )
+                    streaming_tasks.append(task)
+
+                if batch_end < self.num_connections and batch_delay > 0:
+                    logger.info(
+                        f"Batch {batch_num} started; "
+                        f"waiting {batch_delay}s before next batch..."
+                    )
+                    await asyncio.sleep(batch_delay)
+        except Exception:
+            # Cancel and await any streaming tasks already launched by
+            # earlier batches so they don't become orphaned.
+            self.is_active = False
+            for task in streaming_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*streaming_tasks, return_exceptions=True)
+            raise
 
         logger.info(f"All {self.num_connections} connection(s) started")
         return streaming_tasks
@@ -486,6 +497,15 @@ class MultiConnectionWAVClient:
             f"[Connection {conn.connection_id}] Finished streaming WAV "
             f"({play_count} pass(es), {total_chunks} chunks)"
         )
+
+        # Close the input stream to signal EOF so the server sends final
+        # results.  Without this, idle connections (especially early batches)
+        # wait indefinitely for more audio and may be timed out by the server.
+        if conn.is_active and conn.stream:
+            try:
+                await conn.stream.input_stream.close()
+            except Exception:
+                pass
 
     async def end_all_sessions(self):
         """Close all streaming sessions."""
@@ -1045,16 +1065,26 @@ async def run_stream(args) -> int:
         all_streaming = asyncio.gather(*streaming_tasks, return_exceptions=True)
         if args.duration:
             try:
-                await asyncio.wait_for(all_streaming, timeout=args.duration)
+                results = await asyncio.wait_for(all_streaming, timeout=args.duration)
             except asyncio.TimeoutError:
                 print(f"\nDuration of {args.duration}s reached, stopping...")
                 client.is_active = False
                 for task in streaming_tasks:
                     if not task.done():
                         task.cancel()
-                await asyncio.gather(*streaming_tasks, return_exceptions=True)
+                results = await asyncio.gather(*streaming_tasks, return_exceptions=True)
         else:
-            await all_streaming
+            results = await all_streaming
+
+        # Surface any exceptions from streaming tasks that would otherwise
+        # be silently swallowed by return_exceptions=True.
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                conn_id = i + 1
+                logger.error(
+                    f"[Connection {conn_id}] Streaming task failed: {result}",
+                    exc_info=result,
+                )
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user")

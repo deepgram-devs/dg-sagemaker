@@ -1,2 +1,4 @@
 node_modules/
 **.pyc
+test-audio-files/
+.DS_Store
