@@ -22,7 +22,7 @@ dependencies {
     // Default: Maven Central artifact.
     // To build from source instead, drop the JAR into libs/ and uncomment the
     // `files(...)` line below (see README.md).
-    implementation 'com.deepgram:deepgram-sagemaker:0.1.0'
+    implementation 'com.deepgram:deepgram-sagemaker:0.1.2'
     // implementation files('libs/deepgram-sagemaker-transport.jar')
 
     // AWS SDK v2 (pulled in transitively by the transport — declared explicitly
