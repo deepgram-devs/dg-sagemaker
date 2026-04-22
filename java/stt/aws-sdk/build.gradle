@@ -1,0 +1,69 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'com.deepgram.loadtest'
+version = '1.0.0'
+sourceCompatibility = '17'
+targetCompatibility = '17'
+
+repositories {
+    mavenCentral()
+}
+
+// Use consistent AWS SDK version
+def awsSdkVersion = '2.42.33'
+
+dependencies {
+    // AWS SDK v2 - SageMaker Runtime HTTP/2 (bidirectional streaming)
+    implementation "software.amazon.awssdk:sagemakerruntimehttp2:${awsSdkVersion}"
+
+    // Netty-based async HTTP client (for HTTP/2 + Http2Configuration)
+    implementation "software.amazon.awssdk:netty-nio-client:${awsSdkVersion}"
+
+    // AWS auth (default credentials chain + SSO support)
+    implementation "software.amazon.awssdk:auth:${awsSdkVersion}"
+    implementation "software.amazon.awssdk:sts:${awsSdkVersion}"
+    implementation "software.amazon.awssdk:sso:${awsSdkVersion}"
+    implementation "software.amazon.awssdk:ssooidc:${awsSdkVersion}"
+
+    // Reactive Streams (Publisher for event streaming)
+    implementation 'org.reactivestreams:reactive-streams:1.0.4'
+
+    // SLF4J + Logback for logging
+    implementation 'org.slf4j:slf4j-api:2.0.16'
+    implementation 'ch.qos.logback:logback-classic:1.5.16'
+
+    // CLI argument parsing
+    implementation 'info.picocli:picocli:4.7.6'
+    annotationProcessor 'info.picocli:picocli-codegen:4.7.6'
+}
+
+application {
+    mainClass = 'com.deepgram.loadtest.SageMakerStreamLoadTest'
+}
+
+// Allow running with: ./gradlew run --args="..."
+run {
+    standardInput = System.in
+}
+
+jar {
+    manifest {
+        attributes 'Main-Class': 'com.deepgram.loadtest.SageMakerStreamLoadTest'
+    }
+}
+
+// Fat jar for easy distribution
+tasks.register('fatJar', Jar) {
+    archiveClassifier = 'all'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest {
+        attributes 'Main-Class': 'com.deepgram.loadtest.SageMakerStreamLoadTest'
+    }
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    with jar
+}

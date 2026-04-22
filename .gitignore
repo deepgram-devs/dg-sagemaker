@@ -2,3 +2,9 @@ node_modules/
 **.pyc
 test-audio-files/
 .DS_Store
+
+# Java / Gradle
+build/
+.gradle/
+bin/
+java/**/libs/

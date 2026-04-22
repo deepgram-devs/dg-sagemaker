@@ -1,0 +1,69 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'com.deepgram.loadtest'
+version = '1.0.0'
+sourceCompatibility = '17'
+targetCompatibility = '17'
+
+repositories {
+    mavenCentral()
+}
+
+def awsSdkVersion = '2.42.0'
+
+dependencies {
+    // Deepgram Java SDK
+    implementation 'com.deepgram:deepgram-java-sdk:0.2.1'
+
+    // Deepgram SageMaker transport.
+    // Default: Maven Central artifact.
+    // To build from source instead, drop the JAR into libs/ and uncomment the
+    // `files(...)` line below (see README.md).
+    implementation 'com.deepgram:deepgram-sagemaker:0.1.0'
+    // implementation files('libs/deepgram-sagemaker-transport.jar')
+
+    // AWS SDK v2 (pulled in transitively by the transport — declared explicitly
+    // so the load test can drive HTTP/2 client config directly).
+    implementation platform("software.amazon.awssdk:bom:${awsSdkVersion}")
+    implementation 'software.amazon.awssdk:sagemakerruntimehttp2'
+    implementation 'software.amazon.awssdk:netty-nio-client'
+    implementation 'software.amazon.awssdk:sso'
+    implementation 'software.amazon.awssdk:ssooidc'
+
+    // SLF4J + Logback for logging
+    implementation 'org.slf4j:slf4j-api:2.0.16'
+    implementation 'ch.qos.logback:logback-classic:1.5.16'
+
+    // CLI argument parsing
+    implementation 'info.picocli:picocli:4.7.6'
+    annotationProcessor 'info.picocli:picocli-codegen:4.7.6'
+}
+
+application {
+    mainClass = 'com.deepgram.loadtest.DeepgramSdkLoadTest'
+}
+
+run {
+    standardInput = System.in
+}
+
+jar {
+    manifest {
+        attributes 'Main-Class': 'com.deepgram.loadtest.DeepgramSdkLoadTest'
+    }
+}
+
+tasks.register('fatJar', Jar) {
+    archiveClassifier = 'all'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest {
+        attributes 'Main-Class': 'com.deepgram.loadtest.DeepgramSdkLoadTest'
+    }
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    with jar
+}

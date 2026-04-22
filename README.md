@@ -18,6 +18,13 @@ Scripts:
 - `stt_wav_stress.py stream` — streams a WAV file at real-time pace; repeatable load testing without a microphone
 - `stt_wav_stress.py batch` — posts WAV files via HTTP with configurable concurrency; reports latency and throughput
 
+### Java
+
+See [java/README.md](java/README.md) for an index of Java projects.
+
+- [`java/stt/aws-sdk`](java/stt/aws-sdk) — WAV streaming load test built directly on AWS SDK v2 HTTP/2 bidi streaming
+- [`java/stt/deepgram-sdk`](java/stt/deepgram-sdk) — same load test, via the Deepgram Java SDK + SageMaker transport
+
 ---
 
 ## Text-to-Speech (TTS)
