@@ -343,6 +343,10 @@ public class StreamingConnection {
         stopped.set(true);
         active.set(false);
         if (audioPublisher != null) {
+            // Enqueue CloseStream BEFORE complete() so the streamAudio finally
+            // fallback isn't the only path — graceful shutdown via stop() also
+            // sends the documented end-of-stream signal.
+            audioPublisher.publish(CLOSE_STREAM_BYTES);
             audioPublisher.complete();
         }
     }
