@@ -38,6 +38,11 @@ public class StreamingConnection {
     private static final Logger log = LoggerFactory.getLogger(StreamingConnection.class);
     private static final int CHUNK_SIZE = 8192;
 
+    // Deepgram CloseStream control message
+    // (see https://developers.deepgram.com/docs/close-stream)
+    private static final byte[] CLOSE_STREAM_BYTES =
+        "{\"type\":\"CloseStream\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
     private final int connectionId;
     private final SageMakerRuntimeHttp2AsyncClient client;
     private final String endpointName;
@@ -325,6 +330,9 @@ public class StreamingConnection {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
+            // Send CloseStream so Deepgram flushes the final transcript before
+            // closing (https://developers.deepgram.com/docs/close-stream).
+            audioPublisher.publish(CLOSE_STREAM_BYTES);
             audioPublisher.complete();
             log.info("[Conn {}] Audio streaming done ({} passes, {} chunks)",
                 connectionId, playCount, totalChunks);
@@ -387,7 +395,9 @@ public class StreamingConnection {
 
         private void drain(long requested) {
             long emitted = 0;
-            while (emitted < requested && !completed.get()) {
+            // Keep draining queued chunks even after `completed` flips so a
+            // trailing CloseStream message isn't dropped before it's emitted.
+            while (emitted < requested) {
                 try {
                     byte[] chunk = queue.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS);
                     if (chunk == null) {

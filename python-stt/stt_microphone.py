@@ -343,6 +343,16 @@ class DeepgramSageMakerMicrophoneClient:
         # Stop the microphone first
         self.stop_microphone()
 
+        # Send Deepgram CloseStream so the server flushes the final transcript
+        # before closing (https://developers.deepgram.com/docs/close-stream).
+        try:
+            close_msg = json.dumps({"type": "CloseStream"}).encode("utf-8")
+            payload = RequestPayloadPart(bytes_=close_msg)
+            event = RequestStreamEventPayloadPart(value=payload)
+            await self.stream.input_stream.send(event)
+        except Exception as e:
+            logger.warning(f"Could not send CloseStream: {e}")
+
         # Close the input stream - this signals to Deepgram that no more audio is coming
         await self.stream.input_stream.close()
         logger.debug("Input stream closed, waiting for final responses")

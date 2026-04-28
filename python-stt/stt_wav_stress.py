@@ -275,6 +275,18 @@ class DeepgramSageMakerConnection:
         logger.debug(f"[Connection {self.connection_id}] Ending session")
         self.is_active = False
 
+        # Send Deepgram CloseStream so the server flushes the final transcript
+        # before closing (https://developers.deepgram.com/docs/close-stream).
+        try:
+            close_msg = json.dumps({"type": "CloseStream"}).encode("utf-8")
+            payload = RequestPayloadPart(bytes_=close_msg)
+            event = RequestStreamEventPayloadPart(value=payload)
+            await asyncio.wait_for(self.stream.input_stream.send(event), timeout=5.0)
+        except Exception as e:
+            logger.warning(
+                f"[Connection {self.connection_id}] Could not send CloseStream: {e}"
+            )
+
         try:
             await asyncio.wait_for(self.stream.input_stream.close(), timeout=5.0)
         except asyncio.TimeoutError:
