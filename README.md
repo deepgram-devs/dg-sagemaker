@@ -17,6 +17,7 @@ Scripts:
 - `stt_microphone_stress.py` — streams live microphone audio; supports multiple simultaneous connections
 - `stt_wav_stress.py stream` — streams a WAV file at real-time pace; repeatable load testing without a microphone
 - `stt_wav_stress.py batch` — posts WAV files via HTTP with configurable concurrency; reports latency and throughput
+- `stt_sdk.py` — single WAV streaming smoke test using the Deepgram Python SDK plus the SageMaker transport
 
 ### Java
 
@@ -39,6 +40,8 @@ See [python-tts/README.md](python-tts/README.md) for full setup and usage.
 
 Scripts:
 - `tts_stress.py` — streams text phrases to multiple simultaneous bidirectional connections; plays audio from one selectable connection
+- `tts_http.py` — sends one non-WebSocket SageMaker `InvokeEndpoint` HTTP request to `/v1/speak`
+- `tts_sdk.py` — single text-to-speech streaming smoke test using the Deepgram Python SDK plus the SageMaker transport
 
 ---
 
@@ -53,4 +56,4 @@ Scripts:
 - `flux_stress.py file` — streams a WAV file to multiple Flux connections at real-time pace
 - `flux_stress.py microphone` — streams live microphone audio to multiple Flux connections
 - `flux_stress.py list-endpoints` — lists available SageMaker endpoints in the target region
-
+- `flux_sdk.py` — single WAV streaming smoke test using the Deepgram Python SDK `listen.v2` client plus the SageMaker transport

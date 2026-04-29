@@ -6,6 +6,7 @@ supported:
 
 - **`file`** — streams a WAV file at real-time pace (repeatable load testing).
 - **`microphone`** — captures live audio from a microphone via PyAudio.
+- **`flux_sdk.py`** — streams one WAV file through the official Deepgram Python SDK using the `deepgram-sagemaker` transport.
 
 ## What is Flux?
 
@@ -69,6 +70,61 @@ Subcommands:
 | `microphone` | Capture live microphone input and stream it in real-time |
 
 Run `uv run flux_stress.py <subcommand> --help` for full option details.
+
+---
+
+## `flux_sdk.py`
+
+Streams one mono 16-bit PCM WAV file to a Flux SageMaker endpoint through the
+official Deepgram Python SDK `listen.v2` interface. This is a focused smoke test
+for SDK compatibility; use `flux_stress.py` for multi-connection load tests or
+microphone input.
+
+### Examples
+
+**Basic usage:**
+
+```bash
+uv run flux_sdk.py my-flux-endpoint --file audio.wav
+```
+
+**Custom end-of-turn thresholds:**
+
+```bash
+uv run flux_sdk.py my-flux-endpoint \
+  --file audio.wav \
+  --eot-threshold 0.8 \
+  --eager-eot-threshold 0.5 \
+  --eot-timeout-ms 3000
+```
+
+**Multilingual Flux with keyterms:**
+
+```bash
+uv run flux_sdk.py my-flux-endpoint \
+  --file audio.wav \
+  --model flux-general-multi \
+  --keyterms "Deepgram,SageMaker"
+```
+
+### Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--file WAV_FILE` | *(required)* | Mono 16-bit PCM WAV file to stream |
+| `--region REGION` | `us-east-1` | AWS region |
+| `--model MODEL` | `flux-general-en` | `flux-general-en` or `flux-general-multi` |
+| `--eot-threshold 0.5-0.9` | server default | EndOfTurn confidence threshold |
+| `--eager-eot-threshold 0.3-0.9` | disabled | Enables EagerEndOfTurn events |
+| `--eot-timeout-ms 500-10000` | server default | Max silence before forced EndOfTurn |
+| `--keyterms TERM1,TERM2` | *(none)* | Comma-separated keyterms |
+| `--chunk-ms N` | `80` | Audio chunk duration |
+| `--drain-seconds N` | `2` | Wait for trailing responses before exit |
+
+The script requires the endpoint's engine config to include `listen_v2 = true`.
+If the connection fails, verify the endpoint region/name, AWS credentials, IAM
+permission for `sagemaker:InvokeEndpointWithBidirectionalStream`, and that the
+input file is mono 16-bit PCM.
 
 ---
 
