@@ -4,6 +4,7 @@ Python scripts for stress testing Deepgram Speech-to-Text (STT) endpoints deploy
 
 - **`stt_microphone_stress.py`** — streams live microphone audio for real-time transcription
 - **`stt_wav_stress.py`** — streams a WAV file or sends batch HTTP requests; supports multiple simultaneous connections for load testing
+- **`stt_sdk.py`** — streams a WAV file through the official Deepgram Python SDK using the `deepgram-sagemaker` transport
 
 ## Prerequisites
 
@@ -25,6 +26,62 @@ uv sync
 brew install portaudio
 uv sync
 ```
+
+---
+
+## `stt_sdk.py`
+
+Streams one 16-bit PCM WAV file to a Nova STT SageMaker endpoint through the
+official Deepgram Python SDK. This is intended as a small functional smoke test;
+use `stt_wav_stress.py` or `stt_microphone_stress.py` for load testing.
+
+### Examples
+
+**Basic usage:**
+
+```bash
+uv run stt_sdk.py your-endpoint-name --file audio.wav
+```
+
+**With nova-3 keyterms:**
+
+```bash
+uv run stt_sdk.py your-endpoint-name \
+  --file audio.wav \
+  --keyterms "Deepgram,SageMaker" \
+  --region us-east-2
+```
+
+**With diarization and final-only style output from Deepgram disabled:**
+
+```bash
+uv run stt_sdk.py your-endpoint-name \
+  --file audio.wav \
+  --diarize true \
+  --interim-results true
+```
+
+### Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `endpoint_name` | SageMaker endpoint name (required) | — |
+| `--file WAV_FILE` | 16-bit PCM WAV file to stream (required) | — |
+| `--region REGION` | AWS region | `us-east-2` |
+| `--model MODEL` | Deepgram STT model | `nova-3` |
+| `--language LANG` | Language code | `en` |
+| `--punctuate true\|false` | Enable punctuation | `true` |
+| `--interim-results true\|false` | Emit interim transcripts | `true` |
+| `--diarize true\|false` | Enable speaker diarization | `false` |
+| `--keywords WORD:N,...` | Keyword boosting for nova-2 | — |
+| `--keyterms TERM,...` | Keyterm prompting for nova-3 | — |
+| `--chunk-ms N` | Audio chunk duration | `80` |
+| `--drain-seconds N` | Wait for trailing responses before exit | `2` |
+
+The script uses AWS credentials from the standard credential chain. If it fails
+before streaming starts, confirm the endpoint exists in the selected region, is
+`InService`, and your IAM principal has
+`sagemaker:InvokeEndpointWithBidirectionalStream`.
 
 ---
 

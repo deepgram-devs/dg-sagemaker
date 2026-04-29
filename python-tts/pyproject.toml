@@ -1,12 +1,14 @@
 [project]
 name = "python-tts"
 version = "0.1.0"
-description = "Deepgram SageMaker Text-to-Speech streaming stress test client"
+description = "Deepgram SageMaker Text-to-Speech HTTP and streaming clients"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aws-sdk-sagemaker-runtime-http2",
     "boto3>=1.42.34",
+    "deepgram-sagemaker>=0.2.2",
+    "deepgram-sdk>=7.0.0",
     "pyaudio>=0.2.14",
 ]
 
