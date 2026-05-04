@@ -41,6 +41,10 @@ public class SdkStreamingConnection {
 
     private static final Logger log = LoggerFactory.getLogger(SdkStreamingConnection.class);
     private static final int CHUNK_SIZE = 8192;
+    // If real-time pacing drifts more than this far behind, reset the baseline so the loop
+    // doesn't burst-send the catch-up audio at line speed (which overruns the model and
+    // truncates tail-end transcripts after CloseStream).
+    private static final long PACING_DRIFT_THRESHOLD_NANOS = 1_000_000_000L;  // 1 s
 
     private final int connectionId;
     private final String endpointName;
@@ -49,6 +53,7 @@ public class SdkStreamingConnection {
     private final V1ConnectOptions connectOptions;
     private final boolean loop;
     private final int maxRetries;
+    private final int awaitFinalResultsSeconds;
     private final Runnable onFirstPassComplete;
 
     // Metrics
@@ -67,7 +72,7 @@ public class SdkStreamingConnection {
 
     public SdkStreamingConnection(int connectionId, String endpointName, String region,
                                   Path wavPath, V1ConnectOptions connectOptions,
-                                  boolean loop, int maxRetries,
+                                  boolean loop, int maxRetries, int awaitFinalResultsSeconds,
                                   Runnable onFirstPassComplete) {
         this.connectionId = connectionId;
         this.endpointName = endpointName;
@@ -76,6 +81,7 @@ public class SdkStreamingConnection {
         this.connectOptions = connectOptions;
         this.loop = loop;
         this.maxRetries = maxRetries;
+        this.awaitFinalResultsSeconds = awaitFinalResultsSeconds;
         this.onFirstPassComplete = onFirstPassComplete;
     }
 
@@ -154,7 +160,7 @@ public class SdkStreamingConnection {
                 }
 
                 // Wait for final results
-                done.await(15, TimeUnit.SECONDS);
+                done.await(awaitFinalResultsSeconds, TimeUnit.SECONDS);
                 wsClient.disconnect();
 
                 if (streamErrored.get()) {
@@ -221,6 +227,10 @@ public class SdkStreamingConnection {
         int totalChunks = chunkCount.get();
         int playCount = 0;
         long streamStartNanos = System.nanoTime();
+        // Anchor for the pacing math: starts at totalChunks at loop entry, advances on
+        // each pacing reset so target_audio_secs is always measured relative to the most
+        // recent reset rather than the absolute beginning of the stream.
+        int chunksAtPacingStart = totalChunks;
 
         while (!stopped.get()) {
             playCount++;
@@ -243,10 +253,25 @@ public class SdkStreamingConnection {
                     totalChunks++;
                     chunkCount.set(totalChunks);
 
-                    // Pace to real-time
+                    // Pace to real-time, with a drift-reset guard. If sendMedia blocked for
+                    // a long time (SDK retry storm, throttle backoff), the naive pacing math
+                    // sees `elapsed >> targetSec` and burst-sends the next N chunks at line
+                    // speed to "catch up". That overruns the model's input buffer with a
+                    // backlog that can't be flushed in the post-CloseStream window, so
+                    // tail-end transcripts get truncated and WER inflates. When drift exceeds
+                    // PACING_DRIFT_THRESHOLD_NANOS, reset the baseline so pacing resumes at
+                    // real-time from now. The conn's wall-clock runtime grows by the storm
+                    // duration but the model never sees a backlog.
                     long elapsedNanos = System.nanoTime() - streamStartNanos;
-                    double targetSec = totalChunks * chunkDurationSec;
+                    double targetSec = (totalChunks - chunksAtPacingStart) * chunkDurationSec;
                     long sleepNanos = (long) (targetSec * 1_000_000_000L) - elapsedNanos;
+                    if (sleepNanos < -PACING_DRIFT_THRESHOLD_NANOS) {
+                        log.info("[Conn {}] pacing drift {}ms detected — resetting baseline",
+                                connectionId, -sleepNanos / 1_000_000);
+                        streamStartNanos = System.nanoTime();
+                        chunksAtPacingStart = totalChunks;
+                        sleepNanos = 0;
+                    }
                     if (sleepNanos > 0) {
                         Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
                     }

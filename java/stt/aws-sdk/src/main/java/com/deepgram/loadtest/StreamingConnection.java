@@ -37,6 +37,10 @@ public class StreamingConnection {
 
     private static final Logger log = LoggerFactory.getLogger(StreamingConnection.class);
     private static final int CHUNK_SIZE = 8192;
+    // If real-time pacing drifts more than this far behind, reset the baseline so the loop
+    // doesn't burst-send the catch-up audio at line speed (which overruns the model and
+    // truncates tail-end transcripts after CloseStream).
+    private static final long PACING_DRIFT_THRESHOLD_NANOS = 1_000_000_000L;  // 1 s
 
     // Deepgram CloseStream control message
     // (see https://developers.deepgram.com/docs/close-stream)
@@ -284,6 +288,7 @@ public class StreamingConnection {
         int totalChunks = 0;
         int playCount = 0;
         long streamStartNanos = System.nanoTime();
+        int chunksAtPacingStart = 0;
 
         try {
             while (active.get()) {
@@ -305,10 +310,25 @@ public class StreamingConnection {
                         totalChunks++;
                         chunkCount.set(totalChunks);
 
-                        // Pace to real-time
+                        // Pace to real-time, with a drift-reset guard. If publish() blocked for
+                        // a long time (downstream backpressure, retry storm), the naive math
+                        // sees `elapsed >> targetSec` and burst-sends the next N chunks at line
+                        // speed to "catch up". That overruns the model's input buffer with a
+                        // backlog that can't be flushed in the post-CloseStream window, so
+                        // tail-end transcripts get truncated and WER inflates. When drift
+                        // exceeds PACING_DRIFT_THRESHOLD_NANOS, reset the baseline so pacing
+                        // resumes at real-time from now. The conn's wall-clock runtime grows
+                        // by the storm duration but the model never sees a backlog.
                         long elapsedNanos = System.nanoTime() - streamStartNanos;
-                        double targetSec = totalChunks * chunkDurationSec;
+                        double targetSec = (totalChunks - chunksAtPacingStart) * chunkDurationSec;
                         long sleepNanos = (long) (targetSec * 1_000_000_000L) - elapsedNanos;
+                        if (sleepNanos < -PACING_DRIFT_THRESHOLD_NANOS) {
+                            log.info("[Conn {}] pacing drift {}ms detected — resetting baseline",
+                                    connectionId, -sleepNanos / 1_000_000);
+                            streamStartNanos = System.nanoTime();
+                            chunksAtPacingStart = totalChunks;
+                            sleepNanos = 0;
+                        }
                         if (sleepNanos > 0) {
                             Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
                         }

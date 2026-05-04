@@ -82,6 +82,13 @@ public class DeepgramSdkLoadTest implements Runnable {
         description = "Max retries per connection on retryable errors (default: ${DEFAULT-VALUE})")
     private int maxRetries;
 
+    @Option(names = {"--await-final-results"}, defaultValue = "15",
+        description = "After sendCloseStream, wait up to N seconds for the model to flush "
+                    + "remaining transcripts and close the WebSocket. Returns sooner if the "
+                    + "server closes early. Bump this when retries cause large model backlogs "
+                    + "and the default 15 s clips tail-end transcripts (default: ${DEFAULT-VALUE})")
+    private int awaitFinalResultsSeconds;
+
     // --- Deepgram model params ---
     @Option(names = {"--model"}, defaultValue = "nova-3",
         description = "Deepgram model: nova-3, nova-2, etc. (default: ${DEFAULT-VALUE})")
@@ -199,7 +206,7 @@ public class DeepgramSdkLoadTest implements Runnable {
                 for (int i = batchStart; i < batchEnd; i++) {
                     SdkStreamingConnection conn = new SdkStreamingConnection(
                         i + 1, endpointName, region, wavFile,
-                        connectOptions, loop, maxRetries, onFirstPass
+                        connectOptions, loop, maxRetries, awaitFinalResultsSeconds, onFirstPass
                     );
                     allConnections.add(conn);
                     futures.add(conn.start());
