@@ -16,13 +16,13 @@ def awsSdkVersion = '2.42.0'
 
 dependencies {
     // Deepgram Java SDK
-    implementation 'com.deepgram:deepgram-java-sdk:0.2.1'
+    implementation 'com.deepgram:deepgram-java-sdk:0.4.0'
 
     // Deepgram SageMaker transport.
     // Default: Maven Central artifact.
     // To build from source instead, drop the JAR into libs/ and uncomment the
     // `files(...)` line below (see README.md).
-    implementation 'com.deepgram:deepgram-sagemaker:0.1.2'
+    implementation 'com.deepgram:deepgram-sagemaker:0.1.3'
     // implementation files('libs/deepgram-sagemaker-transport.jar')
 
     // AWS SDK v2 (pulled in transitively by the transport — declared explicitly
