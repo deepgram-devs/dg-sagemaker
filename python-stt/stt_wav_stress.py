@@ -113,11 +113,13 @@ class DeepgramSageMakerConnection:
     Each connection handles its own stream and response processing.
     """
 
-    def __init__(self, connection_id, client, endpoint_name, write_fn=None):
+    def __init__(self, connection_id, client, endpoint_name, write_fn=None,
+                 use_close_stream=True):
         self.connection_id = connection_id
         self.client = client
         self.endpoint_name = endpoint_name
         self._write_fn = write_fn or print
+        self.use_close_stream = use_close_stream
         self.stream = None
         self.output_stream = None
         self.is_active = False
@@ -126,6 +128,9 @@ class DeepgramSageMakerConnection:
         self.transcript_count = 0
         self.errored = False
         self.error_messages: list[str] = []
+        # Guards against closing (and CloseStream-ing) the input stream more
+        # than once across the EOF, error, and end_session paths.
+        self._input_closed = False
 
     async def start_session(self, sample_rate, model="nova-3", language="en", **kwargs):
         """
@@ -206,10 +211,45 @@ class DeepgramSageMakerConnection:
             # allowing _process_responses to exit via receive() returning None.
             # Do not cancel response_task directly — awscrt futures raise
             # InvalidStateError when cancelled while a body callback is in flight.
+            # No CloseStream here: the stream has already errored, so a bare
+            # close is the only meaningful action.
+            await self._close_input_stream(send_close_stream=False)
+
+    async def _close_input_stream(self, send_close_stream: bool, timeout: float = 5.0):
+        """Close the input stream once, optionally preceding it with a Deepgram
+        CloseStream frame.
+
+        When ``send_close_stream`` is true and this connection has CloseStream
+        enabled, a single ``{"type":"CloseStream"}`` text frame is sent before
+        the WebSocket Close so the server flushes the final transcript tail
+        (https://developers.deepgram.com/docs/close-stream). Without it, stem
+        does not flush a trailing transcript on a bare WS Close when
+        ``endpointing=false``.
+
+        Idempotent: the EOF, error, and end_session paths may all reach here,
+        but the CloseStream frame and the close are issued at most once.
+        """
+        if self._input_closed:
+            return
+        self._input_closed = True
+
+        if send_close_stream and self.use_close_stream:
             try:
-                await self.stream.input_stream.close()
-            except Exception:
-                pass
+                close_msg = json.dumps({"type": "CloseStream"}).encode("utf-8")
+                payload = RequestPayloadPart(bytes_=close_msg)
+                event = RequestStreamEventPayloadPart(value=payload)
+                await asyncio.wait_for(self.stream.input_stream.send(event), timeout=timeout)
+            except Exception as e:
+                logger.warning(
+                    f"[Connection {self.connection_id}] Could not send CloseStream: {e}"
+                )
+
+        try:
+            await asyncio.wait_for(self.stream.input_stream.close(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(f"[Connection {self.connection_id}] Timeout closing input stream")
+        except Exception as e:
+            logger.error(f"[Connection {self.connection_id}] Error closing input stream: {e}")
 
     async def _process_responses(self):
         """Process streaming responses from Deepgram."""
@@ -275,24 +315,11 @@ class DeepgramSageMakerConnection:
         logger.debug(f"[Connection {self.connection_id}] Ending session")
         self.is_active = False
 
-        # Send Deepgram CloseStream so the server flushes the final transcript
-        # before closing (https://developers.deepgram.com/docs/close-stream).
-        try:
-            close_msg = json.dumps({"type": "CloseStream"}).encode("utf-8")
-            payload = RequestPayloadPart(bytes_=close_msg)
-            event = RequestStreamEventPayloadPart(value=payload)
-            await asyncio.wait_for(self.stream.input_stream.send(event), timeout=5.0)
-        except Exception as e:
-            logger.warning(
-                f"[Connection {self.connection_id}] Could not send CloseStream: {e}"
-            )
-
-        try:
-            await asyncio.wait_for(self.stream.input_stream.close(), timeout=5.0)
-        except asyncio.TimeoutError:
-            logger.warning(f"[Connection {self.connection_id}] Timeout closing input stream")
-        except Exception as e:
-            logger.error(f"[Connection {self.connection_id}] Error closing input stream: {e}")
+        # Close the input stream, sending CloseStream first when enabled so the
+        # server flushes the final transcript (https://developers.deepgram.com/docs/close-stream).
+        # Usually a no-op here because the EOF path already closed the stream;
+        # this covers connections that never reached EOF (e.g. --duration cutoff).
+        await self._close_input_stream(send_close_stream=True)
 
         if self.response_task and not self.response_task.done():
             # Prefer asyncio.wait over wait_for to avoid cancelling the task
@@ -328,11 +355,13 @@ class MultiConnectionWAVClient:
     The file loops if --loop is specified, otherwise it plays once.
     """
 
-    def __init__(self, endpoint_name, wav_path, region=DEFAULT_REGION, num_connections=1):
+    def __init__(self, endpoint_name, wav_path, region=DEFAULT_REGION, num_connections=1,
+                 use_close_stream=True):
         self.endpoint_name = endpoint_name
         self.wav_path = wav_path
         self.region = region
         self.num_connections = num_connections
+        self.use_close_stream = use_close_stream
         self.bidi_endpoint = f"https://runtime.sagemaker.{region}.amazonaws.com:8443"
         self._clients: list[SageMakerRuntimeHTTP2Client] = []
         self._credentials_ready = False
@@ -560,6 +589,7 @@ class MultiConnectionWAVClient:
                     conn = DeepgramSageMakerConnection(
                         i + 1, client, self.endpoint_name,
                         write_fn=self._safe_print,
+                        use_close_stream=self.use_close_stream,
                     )
                     self.connections.append(conn)
 
@@ -636,14 +666,14 @@ class MultiConnectionWAVClient:
             f"({play_count} pass(es), {total_chunks} chunks)"
         )
 
-        # Close the input stream to signal EOF so the server sends final
-        # results.  Without this, idle connections (especially early batches)
-        # wait indefinitely for more audio and may be timed out by the server.
+        # Signal EOF so the server sends final results.  Without this, idle
+        # connections (especially early batches) wait indefinitely for more
+        # audio and may be timed out by the server.  When CloseStream is
+        # enabled this sends {"type":"CloseStream"} before the WS Close so the
+        # trailing transcript is flushed; with --loop this fires once per
+        # session (after the loop fully exits), not on every wrap.
         if conn.is_active and conn.stream:
-            try:
-                await conn.stream.input_stream.close()
-            except Exception:
-                pass
+            await conn._close_input_stream(send_close_stream=True)
 
     def _safe_print(self, text: str):
         """Print a line of text atomically to stdout.
@@ -1222,6 +1252,7 @@ async def run_stream(args) -> int:
         wav_path=args.file,
         region=args.region,
         num_connections=args.connections,
+        use_close_stream=args.use_close_stream,
     )
 
     try:
@@ -1258,6 +1289,7 @@ async def run_stream(args) -> int:
     print(f"Language:     {args.language}")
     print(f"Region:       {args.region}")
     print(f"Loop:         {'yes' if args.loop else 'no'}")
+    print(f"Close:        {'CloseStream + WS Close' if args.use_close_stream else 'bare WS Close'}")
     print(f"Limit:        {limit_str}")
     if redact_list:
         print(f"Redact:       {', '.join(redact_list)}")
@@ -1553,6 +1585,18 @@ async def main() -> int:
         action="store_true",
         default=False,
         help="Enable interim (partial) results (default: disabled)",
+    )
+    stream_parser.add_argument(
+        "--use-close-stream",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Send a Deepgram CloseStream message before closing the WebSocket so "
+            "the server flushes the final transcript tail "
+            "(https://developers.deepgram.com/docs/close-stream). "
+            "Pass --no-use-close-stream to exercise the bare WebSocket Close path "
+            "instead (default: enabled)."
+        ),
     )
     stream_parser.add_argument(
         "--loop",

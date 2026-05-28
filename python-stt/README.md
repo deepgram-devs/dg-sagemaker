@@ -207,6 +207,15 @@ uv run stt_wav_stress.py stream your-endpoint-name --file audio.wav \
   --redact "pii,ssn,email_address"
 ```
 
+**Exercise the bare WebSocket Close path (skip CloseStream):**
+
+By default each session sends a Deepgram [`CloseStream`](https://developers.deepgram.com/docs/close-stream) message before closing the WebSocket so the server flushes the final transcript tail. Pass `--no-use-close-stream` to instead close with a bare WS Close frame (the trailing transcript is dropped when `endpointing=false`):
+
+```bash
+uv run stt_wav_stress.py stream your-endpoint-name --file audio.wav \
+  --no-use-close-stream
+```
+
 **Full example with all stream options:**
 
 ```bash
@@ -243,6 +252,7 @@ uv run stt_wav_stress.py stream your-endpoint-name --file audio.wav \
 | `--keyterms TERM,...` | Comma-separated keyterms to boost recognition (nova-3) | — |
 | `--redact ENTITY,...` | Comma-separated entity types to redact, e.g. `pii,ssn,email_address` | — |
 | `--interim-results true\|false` | Emit interim (partial) transcripts | `true` |
+| `--use-close-stream` / `--no-use-close-stream` | Send a Deepgram [`CloseStream`](https://developers.deepgram.com/docs/close-stream) message before the WebSocket Close so the server flushes the final transcript tail; `--no-use-close-stream` exercises the bare WS Close path instead | on |
 | `--loop` | Loop the WAV file until `--duration` is reached or Ctrl+C | off |
 | `--duration SECONDS` | Stop after this many seconds | play file once |
 | `--region REGION` | AWS region | `us-east-2` |
