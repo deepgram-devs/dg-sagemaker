@@ -114,12 +114,13 @@ class DeepgramSageMakerConnection:
     """
 
     def __init__(self, connection_id, client, endpoint_name, write_fn=None,
-                 use_close_stream=True):
+                 use_close_stream=True, raw=False):
         self.connection_id = connection_id
         self.client = client
         self.endpoint_name = endpoint_name
         self._write_fn = write_fn or print
         self.use_close_stream = use_close_stream
+        self.raw = raw
         self.stream = None
         self.output_stream = None
         self.is_active = False
@@ -283,6 +284,9 @@ class DeepgramSageMakerConnection:
             logger.warning(f"[Connection {self.connection_id}] Non-JSON response: {raw!r}")
             return
 
+        if self.raw:
+            self._write_fn(f"[Conn {self.connection_id}] RAW {raw}")
+
         if 'channel' not in parsed:
             # Surface endpoint error messages (e.g. {"error": "...", "message": "..."})
             err_msg = parsed.get('error') or parsed.get('message')
@@ -356,12 +360,13 @@ class MultiConnectionWAVClient:
     """
 
     def __init__(self, endpoint_name, wav_path, region=DEFAULT_REGION, num_connections=1,
-                 use_close_stream=True):
+                 use_close_stream=True, raw=False):
         self.endpoint_name = endpoint_name
         self.wav_path = wav_path
         self.region = region
         self.num_connections = num_connections
         self.use_close_stream = use_close_stream
+        self.raw = raw
         self.bidi_endpoint = f"https://runtime.sagemaker.{region}.amazonaws.com:8443"
         self._clients: list[SageMakerRuntimeHTTP2Client] = []
         self._credentials_ready = False
@@ -590,6 +595,7 @@ class MultiConnectionWAVClient:
                         i + 1, client, self.endpoint_name,
                         write_fn=self._safe_print,
                         use_close_stream=self.use_close_stream,
+                        raw=self.raw,
                     )
                     self.connections.append(conn)
 
@@ -1264,6 +1270,7 @@ async def run_stream(args) -> int:
         region=args.region,
         num_connections=args.connections,
         use_close_stream=args.use_close_stream,
+        raw=args.raw,
     )
 
     try:
@@ -1607,6 +1614,12 @@ async def main() -> int:
             "(e.g. 'sentiment=true&topics=true&detect_language=true'). Use to "
             "exercise features without a dedicated flag."
         ),
+    )
+    stream_parser.add_argument(
+        "--raw",
+        action="store_true",
+        default=False,
+        help="Print every response frame's raw JSON (for inspecting feature metadata).",
     )
     stream_parser.add_argument(
         "--use-close-stream",
