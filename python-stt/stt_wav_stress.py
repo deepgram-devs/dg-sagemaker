@@ -1238,6 +1238,17 @@ async def run_stream(args) -> int:
 
     redact_list = _parse_redact(args.redact)
 
+    extra_params: dict[str, str] = {}
+    for pair in args.extra.split("&"):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            print(f"ERROR: --extra entry '{pair}' must be in k=v form")
+            return 1
+        k, v = pair.split("=", 1)
+        extra_params[k.strip()] = v.strip()
+
     if args.connections < 1:
         print("ERROR: --connections must be a positive integer (minimum 1)")
         return 1
@@ -1321,6 +1332,7 @@ async def run_stream(args) -> int:
             keyterms=keyterms_list,
             redact_entities=redact_list,
             loop=args.loop,
+            **extra_params,
         )
 
         client._safe_print("\n" + "=" * 60)
@@ -1585,6 +1597,16 @@ async def main() -> int:
         action="store_true",
         default=False,
         help="Enable interim (partial) results (default: disabled)",
+    )
+    stream_parser.add_argument(
+        "--extra",
+        default="",
+        metavar="k=v&k2=v2",
+        help=(
+            "Extra Deepgram query parameters appended verbatim to the request "
+            "(e.g. 'sentiment=true&topics=true&detect_language=true'). Use to "
+            "exercise features without a dedicated flag."
+        ),
     )
     stream_parser.add_argument(
         "--use-close-stream",
