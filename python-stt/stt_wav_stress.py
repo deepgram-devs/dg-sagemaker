@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 import wave
+from collections import Counter, deque
 from urllib.parse import quote
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
@@ -114,7 +115,7 @@ class DeepgramSageMakerConnection:
     """
 
     def __init__(self, connection_id, client, endpoint_name, write_fn=None,
-                 use_close_stream=True, raw=False):
+                 use_close_stream=True, raw=False, ring_size: int = 50):
         self.connection_id = connection_id
         self.client = client
         self.endpoint_name = endpoint_name
@@ -126,9 +127,23 @@ class DeepgramSageMakerConnection:
         self.is_active = False
         self.response_task = None
         self.chunk_count = 0
+        self.byte_count = 0
         self.transcript_count = 0
+        self.interim_count = 0
         self.errored = False
         self.error_messages: list[str] = []
+        # Red-team / metering-correlation diagnostics
+        self.dg_request_id: str | None = None
+        self.metadata_msg: dict | None = None
+        self.message_type_counts: Counter[str] = Counter()
+        self.unknown_message_count = 0
+        self.ring_buffer: deque[tuple[float, str]] = deque(maxlen=ring_size)
+        self.session_start_at: float | None = None
+        self.first_final_at: float | None = None
+        self.last_final_at: float | None = None
+        self.last_recv_at: float | None = None
+        self.close_observed_at: float | None = None
+        self.close_reason: str | None = None
         # Guards against closing (and CloseStream-ing) the input stream more
         # than once across the EOF, error, and end_session paths.
         self._input_closed = False
@@ -182,6 +197,7 @@ class DeepgramSageMakerConnection:
             timeout=30,
         )
         self.is_active = True
+        self.session_start_at = time.monotonic()
 
         output = await asyncio.wait_for(self.stream.await_output(), timeout=30)
         self.output_stream = output[1]
@@ -198,6 +214,7 @@ class DeepgramSageMakerConnection:
             event = RequestStreamEventPayloadPart(value=payload)
             await self.stream.input_stream.send(event)
             self.chunk_count += 1
+            self.byte_count += len(audio_bytes)
             logger.debug(
                 f"[Connection {self.connection_id}] Sent chunk {self.chunk_count} "
                 f"({len(audio_bytes)} bytes)"
@@ -260,16 +277,28 @@ class DeepgramSageMakerConnection:
             while self.is_active:
                 result = await self.output_stream.receive()
                 if result is None:
-                    logger.debug(f"[Connection {self.connection_id}] Stream closed by server")
+                    self.close_observed_at = time.monotonic()
+                    self.close_reason = "stream_end_clean"
+                    logger.info(
+                        f"[Connection {self.connection_id}] Stream closed cleanly "
+                        f"(dg_request_id={self.dg_request_id}, "
+                        f"finals={self.transcript_count}, interims={self.interim_count})"
+                    )
                     break
                 if result.value and result.value.bytes_:
+                    self.last_recv_at = time.monotonic()
                     self._handle_response(result.value.bytes_.decode('utf-8'))
 
 
         except Exception as e:
             msg = _unwrap_streaming_error(e)
+            self.close_observed_at = time.monotonic()
+            self.close_reason = f"exception: {type(e).__name__}: {msg}"
             logger.error(
-                f"[Connection {self.connection_id}] Error in response processor: {msg}",
+                f"[Connection {self.connection_id}] Error in response processor "
+                f"(dg_request_id={self.dg_request_id}, "
+                f"types={dict(self.message_type_counts)}, "
+                f"last_frames={list(self.ring_buffer)[-5:]!r}): {msg}",
                 exc_info=True,
             )
             self.errored = True
@@ -278,11 +307,29 @@ class DeepgramSageMakerConnection:
 
     def _handle_response(self, raw: str):
         """Parse and print a streaming transcript response."""
+        self.ring_buffer.append((time.monotonic(), raw))
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
+            self.unknown_message_count += 1
             logger.warning(f"[Connection {self.connection_id}] Non-JSON response: {raw!r}")
             return
+
+        msg_type = parsed.get("type") or ("Results" if "channel" in parsed else "Unknown")
+        self.message_type_counts[msg_type] += 1
+
+        # Deepgram embeds request_id + model_info inside every Results message's
+        # nested "metadata" object (NOT a separate Metadata-typed message). Also
+        # accept a top-level request_id for Metadata frames in case future
+        # protocol versions split it out.
+        if self.dg_request_id is None:
+            rid = (parsed.get("metadata") or {}).get("request_id") or parsed.get("request_id")
+            if rid:
+                self.dg_request_id = rid
+                self.metadata_msg = parsed.get("metadata") or parsed
+                logger.info(
+                    f"[Connection {self.connection_id}] dg_request_id={rid}"
+                )
 
         if self.raw:
             self._write_fn(f"[Conn {self.connection_id}] RAW {raw}")
@@ -290,10 +337,13 @@ class DeepgramSageMakerConnection:
         if 'channel' not in parsed:
             # Surface endpoint error messages (e.g. {"error": "...", "message": "..."})
             err_msg = parsed.get('error') or parsed.get('message')
-            if err_msg:
+            if err_msg and msg_type not in ("Metadata", "UtteranceEnd", "SpeechStarted"):
                 self.errored = True
                 self.error_messages.append(str(err_msg))
-                logger.error(f"[Connection {self.connection_id}] Endpoint error: {err_msg}")
+                logger.error(
+                    f"[Connection {self.connection_id}] Endpoint error "
+                    f"(dg_request_id={self.dg_request_id}, type={msg_type}): {err_msg}"
+                )
             return
 
         alternatives = parsed.get('channel', {}).get('alternatives', [])
@@ -309,10 +359,39 @@ class DeepgramSageMakerConnection:
         speech_final = parsed.get('speech_final', False)
 
         if is_final:
+            now = time.monotonic()
+            if self.first_final_at is None:
+                self.first_final_at = now
+            self.last_final_at = now
             self.transcript_count += 1
             self._write_fn(f"[Conn {self.connection_id}] ✓ {transcript} ({confidence:.1%})")
         else:
+            self.interim_count += 1
             self._write_fn(f"[Conn {self.connection_id}]   {transcript} [interim]")
+
+    def summary(self) -> dict:
+        """Per-connection structured summary for red-team + metering reconciliation."""
+        def _delta(a, b):
+            return round(b - a, 4) if (a is not None and b is not None) else None
+        return {
+            "connection_id": self.connection_id,
+            "dg_request_id": self.dg_request_id,
+            "errored": self.errored,
+            "error_messages": list(self.error_messages),
+            "close_reason": self.close_reason,
+            "chunks_sent": self.chunk_count,
+            "bytes_sent": self.byte_count,
+            "transcripts_final": self.transcript_count,
+            "transcripts_interim": self.interim_count,
+            "message_type_counts": dict(self.message_type_counts),
+            "unknown_message_count": self.unknown_message_count,
+            "first_final_latency_s": _delta(self.session_start_at, self.first_final_at),
+            "session_duration_s": _delta(self.session_start_at, self.close_observed_at),
+            "ring_buffer_tail": [
+                {"t_rel": round(t - (self.session_start_at or t), 4), "frame": frame}
+                for t, frame in list(self.ring_buffer)[-10:]
+            ],
+        }
 
     async def end_session(self):
         """Close the streaming session."""
@@ -360,13 +439,14 @@ class MultiConnectionWAVClient:
     """
 
     def __init__(self, endpoint_name, wav_path, region=DEFAULT_REGION, num_connections=1,
-                 use_close_stream=True, raw=False):
+                 use_close_stream=True, raw=False, ring_size: int = 50):
         self.endpoint_name = endpoint_name
         self.wav_path = wav_path
         self.region = region
         self.num_connections = num_connections
         self.use_close_stream = use_close_stream
         self.raw = raw
+        self.ring_size = ring_size
         self.bidi_endpoint = f"https://runtime.sagemaker.{region}.amazonaws.com:8443"
         self._clients: list[SageMakerRuntimeHTTP2Client] = []
         self._credentials_ready = False
@@ -596,6 +676,7 @@ class MultiConnectionWAVClient:
                         write_fn=self._safe_print,
                         use_close_stream=self.use_close_stream,
                         raw=self.raw,
+                        ring_size=self.ring_size,
                     )
                     self.connections.append(conn)
 
@@ -1228,6 +1309,10 @@ async def run_stream(args) -> int:
         resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
         logger.debug(f"Raised fd limit from {soft} to {desired}")
 
+    if getattr(args, "crt_trace", False):
+        os.environ["AWS_CRT_LOG_LEVEL"] = "Trace"
+        logger.warning("AWS_CRT_LOG_LEVEL=Trace — expect very verbose stderr output")
+
     keywords_list = []
     if args.keywords:
         for kw in args.keywords.split(','):
@@ -1271,6 +1356,7 @@ async def run_stream(args) -> int:
         num_connections=args.connections,
         use_close_stream=args.use_close_stream,
         raw=args.raw,
+        ring_size=args.ring_size,
     )
 
     try:
@@ -1406,11 +1492,47 @@ async def run_stream(args) -> int:
         print(f"Errored:            {len(errored)}")
         print(f"Total wall time:    {wall_elapsed:.2f}s")
 
+        with_rid = sum(1 for c in conns if c.dg_request_id)
+        total_finals = sum(c.transcript_count for c in conns)
+        total_interims = sum(c.interim_count for c in conns)
+        total_unknown = sum(c.unknown_message_count for c in conns)
+        ffl = [
+            c.summary()["first_final_latency_s"] for c in conns
+            if c.summary()["first_final_latency_s"] is not None
+        ]
+        agg_types: Counter[str] = Counter()
+        for c in conns:
+            agg_types.update(c.message_type_counts)
+
+        print(f"With dg_request_id: {with_rid}/{len(conns)}")
+        print(f"Final transcripts:  {total_finals}")
+        print(f"Interim results:    {total_interims}")
+        print(f"Unknown messages:   {total_unknown}")
+        if agg_types:
+            print(f"Msg-type histogram: {dict(agg_types)}")
+        if ffl:
+            ffl_sorted = sorted(ffl)
+            p50 = ffl_sorted[len(ffl_sorted) // 2]
+            p95 = ffl_sorted[max(0, int(len(ffl_sorted) * 0.95) - 1)]
+            print(
+                f"First-final latency (s): "
+                f"min={min(ffl):.2f} p50={p50:.2f} p95={p95:.2f} max={max(ffl):.2f}"
+            )
+
         if all_errors:
             print("\nErrors:")
             for msg, count in all_errors.items():
                 prefix = f"  (x{count}) " if count > 1 else "  "
                 print(f"{prefix}{msg}")
+
+        if args.summary_jsonl:
+            try:
+                with open(args.summary_jsonl, "w") as f:
+                    for c in conns:
+                        f.write(json.dumps(c.summary()) + "\n")
+                print(f"\nPer-connection summary written: {args.summary_jsonl}")
+            except OSError as e:
+                logger.error(f"Could not write --summary-jsonl {args.summary_jsonl}: {e}")
 
         print("=" * 60)
 
@@ -1643,6 +1765,38 @@ async def main() -> int:
         type=float,
         default=None,
         help="Stop automatically after this many seconds (default: run until file ends or Ctrl+C)",
+    )
+    stream_parser.add_argument(
+        "--ring-size",
+        type=int,
+        default=50,
+        metavar="N",
+        help=(
+            "Per-connection ring buffer of last-N raw response frames "
+            "(tail dumped on error + in --summary-jsonl). Default: 50."
+        ),
+    )
+    stream_parser.add_argument(
+        "--summary-jsonl",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Write one JSONL line per connection at end of run with "
+            "dg_request_id, per-message-type counts, transcript counts, "
+            "first-final latency, close reason, error messages, and ring-buffer "
+            "tail. Use to correlate client-visible behavior with shim CloudWatch "
+            "logs by dg_request_id."
+        ),
+    )
+    stream_parser.add_argument(
+        "--crt-trace",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable awscrt trace logging (sets AWS_CRT_LOG_LEVEL=Trace). Surfaces "
+            "HTTP/2 PING/GOAWAY/RST_STREAM frames the smithy bidi-stream API "
+            "otherwise hides. Extremely verbose — use only for narrow repro."
+        ),
     )
 
     # -- batch subcommand -----------------------------------------------------
