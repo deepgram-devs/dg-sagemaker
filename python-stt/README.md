@@ -1,9 +1,10 @@
 # Deepgram SageMaker Speech-to-Text Stress Test Client
 
-Python scripts for stress testing Deepgram Speech-to-Text (STT) endpoints deployed on AWS SageMaker. Two input modes are supported:
+Python scripts for stress testing Deepgram Speech-to-Text (STT) endpoints deployed on AWS SageMaker. Three input modes are supported:
 
 - **`stt_microphone_stress.py`** — streams live microphone audio for real-time transcription
-- **`stt_wav_stress.py`** — streams a WAV file or sends batch HTTP requests; supports multiple simultaneous connections for load testing
+- **`stt_wav_stress.py`** — streams a WAV file or sends synchronous batch HTTP requests; supports multiple simultaneous connections for load testing
+- **`stt_wav_async.py`** — transcribes a WAV file via SageMaker `InvokeEndpointAsync` (S3 in/out); the right path for files larger than the 25 MB synchronous limit (up to 1 GiB), for jobs that need up to 60 min of processing time, or need the endpoint to scale to zero when there are no requests being processed.
 
 ## Prerequisites
 
@@ -342,3 +343,167 @@ uv run stt_wav_stress.py batch your-endpoint-name --file audio.wav \
 | `--redact ENTITY,...` | Comma-separated entity types to redact, e.g. `pii,ssn,email_address` | — |
 | `--region REGION` | AWS region | `us-east-2` |
 | `--log-level LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` | `INFO` |
+
+---
+
+## `stt_wav_async.py`
+
+Transcribes a WAV file via the SageMaker `InvokeEndpointAsync` API (S3 input → S3 output). Use this when:
+
+- The audio is larger than the **6 MB** synchronous `InvokeEndpoint` body limit, **and/or**
+- Inference will take longer than the synchronous 60-second wall-clock budget.
+
+Async inference accepts S3 objects up to **1 GiB** and gives each invocation up to **60 minutes** of processing time. The script uploads the WAV to S3 (or accepts an existing S3 URI), calls `InvokeEndpointAsync`, and polls the configured output + failure prefixes for the result. Multiple invocations can run in parallel via `--concurrency`.
+
+### Endpoint prerequisites
+
+The target endpoint must be created from an `EndpointConfig` that carries an `AsyncInferenceConfig`, for example:
+
+```json
+"AsyncInferenceConfig": {
+  "OutputConfig": {
+    "S3OutputPath":  "s3://your-async-bucket-name/output/",
+    "S3FailurePath": "s3://your-async-bucket-name/output/failures/"
+  },
+  "ClientConfig": { "MaxConcurrentInvocationsPerInstance": 4 }
+}
+```
+
+The SageMaker execution role attached to the endpoint also needs:
+
+- `s3:GetObject` on the input prefix used by this script
+- `s3:PutObject` on the output + failures prefixes
+- `s3:ListBucket` on the bucket
+
+Note: `AsyncInferenceConfig` is incompatible with `EnableSSMAccess=true` on the same production variant — pick one or the other.
+
+The IAM identity that **runs the script** only needs:
+
+- `s3:PutObject` on the chosen upload key (skipped when `--input-s3-uri` is supplied)
+- `s3:GetObject` on the resulting success / failure objects
+- `sagemaker:InvokeEndpointAsync` on the endpoint
+
+### Examples
+
+**Basic usage (upload + transcribe a long file):**
+
+```bash
+uv run stt_wav_async.py your-async-endpoint-name \
+  --file long-recording.wav \
+  --bucket your-async-bucket-name
+```
+
+**Reuse an existing S3 object (skip upload):**
+
+```bash
+uv run stt_wav_async.py your-async-endpoint-name \
+  --file long-recording.wav \
+  --input-s3-uri s3://your-async-bucket-name/input/long-recording.wav
+```
+
+**Different model and language:**
+
+```bash
+uv run stt_wav_async.py your-async-endpoint-name \
+  --file audio.wav --bucket your-async-bucket-name \
+  --model nova-2 --language es
+```
+
+**Diarization + keyterms:**
+
+```bash
+uv run stt_wav_async.py your-async-endpoint-name \
+  --file audio.wav --bucket your-async-bucket-name \
+  --diarize true --keyterms "Deepgram,SageMaker"
+```
+
+**Throughput test — 20 parallel invocations of the same file:**
+
+```bash
+uv run stt_wav_async.py your-async-endpoint-name \
+  --file audio.wav --bucket your-async-bucket-name \
+  --concurrency 20 --requests 20
+```
+
+**Long-running invocation with a custom per-request timeout:**
+
+```bash
+uv run stt_wav_async.py your-async-endpoint-name \
+  --file audio.wav --bucket your-async-bucket-name \
+  --invocation-timeout 3600 --poll-interval 10
+```
+
+**Extra Deepgram parameters (sentiment, topics, etc.):**
+
+```bash
+uv run stt_wav_async.py your-async-endpoint-name \
+  --file audio.wav --bucket your-async-bucket-name \
+  --extra "sentiment=true&topics=true"
+```
+
+**Full example with all options:**
+
+```bash
+uv run stt_wav_async.py your-async-endpoint-name \
+  --file long-recording.wav \
+  --bucket your-async-bucket-name \
+  --upload-prefix stt-async-input \
+  --model nova-3 \
+  --language en \
+  --diarize true \
+  --punctuate true \
+  --keyterms "Deepgram,SageMaker" \
+  --redact "pii,ssn" \
+  --extra "sentiment=true&topics=true" \
+  --concurrency 4 \
+  --requests 8 \
+  --invocation-timeout 3600 \
+  --poll-interval 5 \
+  --inference-id-prefix bug-bash-2026-06 \
+  --region us-east-2 \
+  --log-level INFO
+```
+
+### Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `endpoint_name` | SageMaker endpoint name (required) | — |
+| `--file WAV_FILE` | Path to a 16-bit PCM WAV file (up to 1 GiB) | — |
+| `--bucket BUCKET` | Upload-to bucket — object lands at `s3://<bucket>/<upload-prefix>/<uuid>.wav`. **Mutually exclusive with `--input-s3-uri`** | — |
+| `--input-s3-uri S3_URI` | Use an existing S3 object instead of uploading. **Mutually exclusive with `--bucket`** | — |
+| `--upload-prefix PREFIX` | Key prefix used with `--bucket` | `stt-async-input` |
+| `--model MODEL` | Deepgram model | `nova-3` |
+| `--language LANG` | Language code | `en` |
+| `--diarize true\|false` | Enable speaker diarization | `false` |
+| `--punctuate true\|false` | Enable punctuation | `true` |
+| `--keyterms TERM,...` | Comma-separated keyterms to boost recognition (nova-3) | — |
+| `--redact ENTITY,...` | Comma-separated entity types to redact, e.g. `pii,ssn,email_address` | — |
+| `--extra k=v&k2=v2` | Extra Deepgram query parameters appended verbatim | — |
+| `--concurrency N` | Invocations to keep in flight in parallel | `1` |
+| `--requests N` | Total number of invocations to submit | same as `--concurrency` |
+| `--invocation-timeout SECONDS` | Per-invocation timeout passed to SageMaker (max 3600) | `3600` |
+| `--poll-interval SECONDS` | Seconds between S3 polls for each invocation's result | `5.0` |
+| `--inference-id-prefix PREFIX` | Override the `InferenceId` prefix sent to SageMaker | random per run |
+| `--show-transcript` / `--no-show-transcript` | Print transcript head per successful invocation | on |
+| `--transcript-chars N` | Characters of each transcript to print | `300` |
+| `--region REGION` | AWS region | `us-east-2` |
+| `--log-level LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` | `INFO` |
+
+### Output
+
+Each successful invocation is summarized as:
+
+```
+[Request   1] ✓ (24.83s) duration=1791.53s conf=99.5% output=s3://your-async-bucket-name/output/3051404d-7473-4e61-ba37-74f31f1bf3ed.out
+             november the tenth wednesday nine pm i'm standing in a dark alley after waiting several hours…
+```
+
+`duration` is the audio duration the container reported; `elapsed` is the wall-clock submit-to-result time observed by this script (includes queue wait + inference + polling slack). The full JSON response stays in S3 at the listed `output=` URI for follow-up inspection (e.g. `aws s3 cp <uri> - | jq`).
+
+Failures are written to the `S3FailurePath` configured on the EndpointConfig and printed as:
+
+```
+[Request   2] ERROR (1.34s): Endpoint reported failure: billing: nats grace window exceeded
+             output uri: s3://your-async-bucket-name/output/failures/8ef24943-a086-45f8-87c6-2cba6f37aaa7-error.out
+```
