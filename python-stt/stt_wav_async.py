@@ -4,7 +4,7 @@ Deepgram SageMaker WAV File STT Client - Async Inference (S3 In/Out)
 
 Transcribes a WAV file via the SageMaker `InvokeEndpointAsync` API on an
 endpoint whose `EndpointConfig` carries an `AsyncInferenceConfig`. Unlike
-the synchronous `batch` mode (capped at a 6 MB request body), async
+the synchronous `batch` mode (capped at a 25 MB request body), async
 inference accepts up to a 1 GB S3 object and a 60-minute processing budget,
 making it the right path for long-form pre-recorded audio.
 
