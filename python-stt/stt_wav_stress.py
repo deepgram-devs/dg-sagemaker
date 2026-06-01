@@ -52,7 +52,7 @@ DEFAULT_REGION = "us-east-2"
 CHUNK_SIZE = 8192  # Bytes per audio chunk (stream mode)
 
 # SageMaker InvokeEndpoint body limit (bytes)
-INVOKE_ENDPOINT_MAX_BYTES = 6_291_456  # 6 MB
+INVOKE_ENDPOINT_MAX_BYTES = 26_214_400  # 25 MB
 
 # Deepgram supported redaction entity types
 # https://developers.deepgram.com/docs/supported-entity-types
@@ -879,7 +879,7 @@ class BatchSTTClient:
     Supports concurrent requests with configurable parallelism for throughput
     and latency stress testing.
 
-    Note: SageMaker InvokeEndpoint has a 6 MB request body limit. WAV files
+    Note: SageMaker InvokeEndpoint has a 25 MB request body limit. WAV files
     larger than this cannot be submitted in batch mode; use stream mode or
     split the audio into shorter segments.
     """
@@ -931,7 +931,7 @@ class BatchSTTClient:
 
         Populates sample_rate, channels, and duration_seconds as a side effect.
         Raises ValueError for non-16-bit PCM files or files exceeding the
-        SageMaker InvokeEndpoint 6 MB body limit.
+        SageMaker InvokeEndpoint 25 MB body limit.
         """
         try:
             with wave.open(self.wav_path, 'rb') as wf:
@@ -959,7 +959,7 @@ class BatchSTTClient:
             mb = len(audio_bytes) / 1_048_576
             raise ValueError(
                 f"WAV file is {mb:.1f} MB, which exceeds the SageMaker InvokeEndpoint "
-                f"6 MB body limit. Use stream mode for longer audio, or split the file "
+                f"25 MB body limit. Use stream mode for longer audio, or split the file "
                 "into shorter segments with: "
                 "ffmpeg -i input.wav -f segment -segment_time 60 segment_%03d.wav"
             )

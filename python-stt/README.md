@@ -265,7 +265,7 @@ uv run stt_wav_stress.py stream your-endpoint-name --file audio.wav \
 
 Posts the entire WAV file in a single HTTP request using the SageMaker `InvokeEndpoint` API. Supports configurable parallelism via `--concurrency` for throughput and latency stress testing. Each concurrent request runs on its own Python thread with its own boto3 client. After all requests complete, a summary table shows min/avg/p95/max latency, throughput, and success/failure counts.
 
-> **Note:** SageMaker `InvokeEndpoint` has a 6 MB request body limit. For larger files, use `stream` mode or split the file:
+> **Note:** SageMaker `InvokeEndpoint` has a 25 MB request body limit. For larger files, use `stream` mode or split the file:
 > ```bash
 > ffmpeg -i input.wav -f segment -segment_time 60 segment_%03d.wav
 > ```
@@ -332,7 +332,7 @@ uv run stt_wav_stress.py batch your-endpoint-name --file audio.wav \
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--file WAV_FILE` | Path to a 16-bit PCM WAV file, max 6 MB (required) | — |
+| `--file WAV_FILE` | Path to a 16-bit PCM WAV file, max 25 MB (required) | — |
 | `--concurrency N` | Number of requests to run in parallel | `1` |
 | `--requests N` | Total number of requests to send | same as `--concurrency` |
 | `--model MODEL` | Deepgram model | `nova-3` |
@@ -350,7 +350,7 @@ uv run stt_wav_stress.py batch your-endpoint-name --file audio.wav \
 
 Transcribes a WAV file via the SageMaker `InvokeEndpointAsync` API (S3 input → S3 output). Use this when:
 
-- The audio is larger than the **6 MB** synchronous `InvokeEndpoint` body limit, **and/or**
+- The audio is larger than the **25 MB** synchronous `InvokeEndpoint` body limit, **and/or**
 - Inference will take longer than the synchronous 60-second wall-clock budget.
 
 Async inference accepts S3 objects up to **1 GiB** and gives each invocation up to **60 minutes** of processing time. The script uploads the WAV to S3 (or accepts an existing S3 URI), calls `InvokeEndpointAsync`, and polls the configured output + failure prefixes for the result. Multiple invocations can run in parallel via `--concurrency`.

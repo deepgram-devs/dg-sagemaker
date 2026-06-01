@@ -445,7 +445,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Transcribe a WAV file via the SageMaker `InvokeEndpointAsync` API "
-            "(S3 input/output). Suitable for files larger than the 6 MB "
+            "(S3 input/output). Suitable for files larger than the 25 MB "
             "synchronous invoke limit (up to 1 GiB)."
         )
     )
