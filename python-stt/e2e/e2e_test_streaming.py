@@ -141,12 +141,6 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
             connections=1,
         ),
         StreamScenario(
-            name="basic_15min",
-            description="1 conn, ~15 min looped file (long-form smoke)",
-            use_long_form=True,
-            connections=1,
-        ),
-        StreamScenario(
             name="concurrent_5x_25s",
             description="5 simultaneous connections, 25 s file",
             connections=5,
