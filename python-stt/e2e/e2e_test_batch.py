@@ -436,6 +436,90 @@ def _split_s3_uri(s3_uri: str) -> tuple[str, str]:
     return parsed.netloc, parsed.path.lstrip("/")
 
 
+class PreflightError(RuntimeError):
+    """Raised when the async preflight detects an IAM/S3 misconfiguration
+    that would otherwise cause invoke_endpoint_async to queue forever
+    with no surfaced error."""
+
+
+def preflight_async_iam(
+    session: boto3.Session,
+    region: str,
+    endpoint: str,
+    bucket: str,
+    upload_prefix: str,
+) -> None:
+    """Fail-fast before any S3 upload / invoke when the endpoint's
+    execution role can't read input or write output / failures.
+
+    SageMaker's async dispatcher reads InputLocation + writes OutputLocation
+    using the *endpoint's execution role* (not the caller's). If that role
+    lacks GetObject on the input or PutObject on the output/failure prefix,
+    invoke_endpoint_async returns 200 and the job queues silently — no
+    CloudWatch invocations, no container logs, ~30 min wasted.
+
+    Primary path uses iam:SimulatePrincipalPolicy on the exec role.
+    Falls back to a HeadBucket + zero-byte probe write/delete when the
+    caller lacks iam:SimulatePrincipalPolicy. Final fallback is a WARN.
+    """
+    sm = session.client("sagemaker", region_name=region)
+    iam = session.client("iam")
+    ep = sm.describe_endpoint(EndpointName=endpoint)
+    cfg = sm.describe_endpoint_config(EndpointConfigName=ep["EndpointConfigName"])
+    variant = cfg["ProductionVariants"][0]
+    model = sm.describe_model(ModelName=variant["ModelName"])
+    exec_role = model["ExecutionRoleArn"]
+    out_cfg = cfg["AsyncInferenceConfig"]["OutputConfig"]
+    out_bucket, out_key_prefix = _split_s3_uri(out_cfg["S3OutputPath"])
+    fail_bucket, fail_key_prefix = _split_s3_uri(out_cfg["S3FailurePath"])
+    checks: list[tuple[str, str]] = [
+        ("s3:GetObject", f"arn:aws:s3:::{bucket}/{upload_prefix.strip('/')}/probe.wav"),
+        ("s3:PutObject", f"arn:aws:s3:::{out_bucket}/{out_key_prefix.strip('/')}/probe.out"),
+        ("s3:PutObject", f"arn:aws:s3:::{fail_bucket}/{fail_key_prefix.strip('/')}/probe.out"),
+    ]
+    logger.info("preflight: exec_role=%s checks=%s", exec_role, checks)
+    try:
+        denials: list[str] = []
+        for action, resource in checks:
+            r = iam.simulate_principal_policy(
+                PolicySourceArn=exec_role, ActionNames=[action], ResourceArns=[resource],
+            )
+            decision = r["EvaluationResults"][0]["EvalDecision"]
+            if decision != "allowed":
+                matched = r["EvaluationResults"][0].get("MatchedStatements") or []
+                denials.append(f"{action} on {resource}: {decision} (matched={matched})")
+        if denials:
+            raise PreflightError(
+                f"exec role {exec_role} cannot perform required S3 ops:\n  "
+                + "\n  ".join(denials)
+                + "\nFix the role's S3 policy before retrying — invoke_endpoint_async "
+                  "would otherwise queue silently."
+            )
+        logger.info("preflight: iam:SimulatePrincipalPolicy passed for all 3 checks")
+        return
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code not in ("AccessDenied", "AccessDeniedException", "UnauthorizedOperation"):
+            raise
+        logger.info("preflight: caller lacks iam:SimulatePrincipalPolicy (%s); using probe fallback", code)
+    s3 = session.client("s3", region_name=region)
+    probe_key = f"_preflight-probe-{uuid.uuid4()}.tmp"
+    for b, prefix in ((bucket, upload_prefix), (out_bucket, out_key_prefix), (fail_bucket, fail_key_prefix)):
+        key = f"{prefix.strip('/')}/{probe_key}"
+        try:
+            s3.head_bucket(Bucket=b)
+            s3.put_object(Bucket=b, Key=key, Body=b"")
+            s3.delete_object(Bucket=b, Key=key)
+        except ClientError as e:
+            logger.warning(
+                "preflight: caller-side probe on s3://%s/%s failed (%s); "
+                "cannot verify exec-role perms — proceeding anyway",
+                b, key, e,
+            )
+            return
+    logger.info("preflight: caller-side probe writes succeeded (exec-role perms unverified)")
+
+
 # ---------------------------------------------------------------------------
 # Sync runner
 # ---------------------------------------------------------------------------
@@ -832,6 +916,11 @@ def _make_parser() -> argparse.ArgumentParser:
     p.add_argument("--invocation-timeout-s", type=int, default=3600)
     p.add_argument("--poll-interval-s", type=float, default=5.0)
     p.add_argument("--force-download", action="store_true")
+    p.add_argument("--skip-preflight", action="store_true",
+                   help="(async only) skip the IAM/S3 preflight check on the endpoint's "
+                        "execution role. Preflight is ON by default to fail-fast when the "
+                        "exec role can't read input / write output, which otherwise hangs "
+                        "the run silently for the full invocation-timeout.")
     p.add_argument("--log-level", default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     return p
@@ -895,6 +984,17 @@ def main() -> int:
     except (NoCredentialsError, PartialCredentialsError) as e:
         print(f"ERROR: AWS credentials missing: {e}", file=sys.stderr)
         return 2
+
+    if args.mode == "async" and not args.skip_preflight:
+        try:
+            preflight_async_iam(
+                session, args.region, args.endpoint_name, args.bucket, args.upload_prefix,
+            )
+        except PreflightError as e:
+            print(f"ERROR: async preflight failed:\n{e}", file=sys.stderr)
+            return 2
+    elif args.mode == "async" and args.skip_preflight:
+        logger.warning("preflight: SKIPPED via --skip-preflight (exec-role IAM unchecked)")
 
     short_wav = workdir / "spacewalk.wav"
     long_wav = workdir / "spacewalk-15min.wav"
