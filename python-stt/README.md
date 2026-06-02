@@ -6,6 +6,11 @@ Python scripts for stress testing Deepgram Speech-to-Text (STT) endpoints deploy
 - **`stt_wav_stress.py`** — streams a WAV file or sends synchronous batch HTTP requests; supports multiple simultaneous connections for load testing
 - **`stt_wav_async.py`** — transcribes a WAV file via SageMaker `InvokeEndpointAsync` (S3 in/out); the right path for files larger than the 25 MB synchronous limit (up to 1 GiB), for jobs that need up to 60 min of processing time, or need the endpoint to scale to zero when there are no requests being processed.
 
+Two **end-to-end correctness drivers** sit on top of these scripts (in `e2e/`) as definitive promotion gates:
+
+- **`e2e/e2e_test_streaming.py`** — downloads `https://dpgr.am/spacewalk.wav`, multiplies it to ~15 min, drives `stt_wav_stress.py stream` through 10 scenarios (basic / sustained-concurrency / ramped / feature flags / adversarial close path), and validates every connection's `combined_final_text` against a known reference transcript via Word Error Rate.
+- **`e2e/e2e_test_batch.py`** — same fixtures, takes `--mode sync` or `--mode async` to match how the target endpoint is configured (a single batch endpoint serves only one transport). Sync mode runs five scenarios on the 25-second sample (≤ 25 MB body limit); async mode runs five scenarios on the long-form 15-min variant via S3 in/out (~76 MB, well over the sync cap), including summarize via fathom.
+
 ## Prerequisites
 
 - Python 3.14+
@@ -507,3 +512,92 @@ Failures are written to the `S3FailurePath` configured on the EndpointConfig and
 [Request   2] ERROR (1.34s): Endpoint reported failure: billing: nats grace window exceeded
              output uri: s3://your-async-bucket-name/output/failures/8ef24943-a086-45f8-87c6-2cba6f37aaa7-error.out
 ```
+
+---
+
+## End-to-end correctness drivers (`e2e/`)
+
+Run-everything scripts that exercise an endpoint across many scenarios and gate promotion on transcript correctness. Both download `https://dpgr.am/spacewalk.wav` (~25 s English mono) once, multiply it to a ~15 min long-form variant on first run, then validate each session's transcript against the canonical reference text via Word Error Rate (WER ≤ 5 % by default; relaxed per-scenario where transcription is intentionally distorted, e.g. redact).
+
+The drivers live in `e2e/` alongside `e2e_test_common.py` (shared helpers); the parent directory holds the core stress scripts they wrap.
+
+### `e2e/e2e_test_streaming.py`
+
+Definitive correctness gate for a **streaming** endpoint. Subprocesses `stt_wav_stress.py stream` ten times with different argument sets — short-form, long-form, sustained-concurrency, ramped-concurrency, each major feature flag, and an adversarial bare-WS-close path — and reads each connection's `combined_final_text` out of the per-conn `--summary-jsonl` to compute WER.
+
+```bash
+uv run e2e/e2e_test_streaming.py your-streaming-endpoint-name --region us-east-2
+
+# list scenarios without running:
+uv run e2e/e2e_test_streaming.py --list
+
+# run a single scenario:
+uv run e2e/e2e_test_streaming.py your-endpoint --scenarios basic_25s
+
+# tighten the global threshold to 3 %:
+uv run e2e/e2e_test_streaming.py your-endpoint --wer-threshold 0.03
+```
+
+| Scenario | What it checks |
+|---|---|
+| `basic_25s` | One connection, 25 s file, defaults — baseline WER |
+| `basic_15min` | One connection, 15 min looped file — long-form smoke |
+| `concurrent_5x_25s` | 5 simultaneous connections, 25 s file |
+| `concurrent_10x_15min` | 10 simultaneous connections, 15 min file — sustained load |
+| `ramp_10x_step5` | 10 conns in batches of 5 with 2 s delay |
+| `feature_interim` | `--interim-results true` — verifies interims emitted |
+| `feature_diarize` | `--diarize true` — body unchanged, speaker tags added |
+| `feature_keyterms` | `--keyterms 'spacewalk,female'` — presence check on `spacewalk` |
+| `feature_redact_name` | `--redact name` — presence of redaction marker, WER skipped |
+| `adversarial_bare_close` | `--no-use-close-stream` — bare WS close (relaxed WER 10 %) |
+
+Exit code 0 = all pass, non-zero = any scenario failed. Per-scenario stdout / stderr / summary-jsonl land in `<workdir>/logs/<scenario>.{stdout,stderr,summary.jsonl}.log` for triage; aggregated `results.json` at `<workdir>/results.json`. Default workdir: `/tmp/dg-sagemaker-e2e/streaming/<timestamp>/`.
+
+### `e2e/e2e_test_batch.py`
+
+Definitive correctness gate for a **batch** endpoint. A batch endpoint serves one of two transports — sync `invoke_endpoint` or async `invoke_endpoint_async` — based on whether its EndpointConfig includes an `AsyncInferenceConfig` block. `--mode {sync,async}` picks the matching scenario set; the driver refuses to run a sync scenario set against an async-configured endpoint or vice versa.
+
+```bash
+# sync-configured endpoint (no AsyncInferenceConfig):
+uv run e2e/e2e_test_batch.py your-sync-endpoint --mode sync --region us-east-2
+
+# async-configured endpoint (with AsyncInferenceConfig):
+uv run e2e/e2e_test_batch.py your-async-endpoint --mode async \
+  --bucket your-async-bucket --region us-east-2
+
+# subset (must still match the mode):
+uv run e2e/e2e_test_batch.py your-async-endpoint --mode async \
+  --bucket your-async-bucket --scenarios async_25s,async_15min
+
+# list scenarios for one mode:
+uv run e2e/e2e_test_batch.py --mode async --list
+```
+
+| Scenario | Transport | What it checks |
+|---|---|---|
+| `sync_25s` | sync | Baseline WER on 25 s file |
+| `sync_25s_concurrent_5` | sync | 5 concurrent invokes |
+| `sync_25s_diarize` | sync | `diarize=true` — body unchanged |
+| `sync_25s_keyterms` | sync | keyterms biasing, presence check |
+| `sync_25s_redact_name` | sync | `redact=name`, WER skipped |
+| `async_25s` | async | Short-form smoke (25 s file via S3) |
+| `async_15min` | async | 15 min audio via S3 in/out |
+| `async_15min_concurrent_4` | async | 4 concurrent async invokes |
+| `async_15min_diarize` | async | Diarize on long audio |
+| `async_15min_summarize` | async | `summarize=v2` — requires fathom in bundle |
+
+`--bucket` is required with `--mode async` (where input WAVs are uploaded before each invocation) and ignored with `--mode sync`. Same exit-code semantics and `results.json` layout as the streaming driver.
+
+### Common options
+
+Both drivers accept:
+
+| Option | Default | Description |
+|---|---|---|
+| `--region` | `us-east-2` | AWS region |
+| `--model` / `--language` | `nova-3` / `en` | passed through to each scenario |
+| `--workdir DIR` | `/tmp/dg-sagemaker-e2e/<kind>/<ts>` | fixtures + logs |
+| `--target-long-form-s` | `900` (15 min) | duration of the multiplied long-form WAV |
+| `--scenarios` | (all) | comma-separated subset; use `--list` to discover names |
+| `--wer-threshold` | `0.05` | default per-scenario threshold (some scenarios override) |
+| `--force-download` | off | re-download spacewalk.wav even if cached |

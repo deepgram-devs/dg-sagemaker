@@ -129,6 +129,7 @@ class DeepgramSageMakerConnection:
         self.chunk_count = 0
         self.byte_count = 0
         self.transcript_count = 0
+        self.final_transcript_parts: list[str] = []
         self.interim_count = 0
         self.errored = False
         self.error_messages: list[str] = []
@@ -170,7 +171,11 @@ class DeepgramSageMakerConnection:
         }
         query_params.update(kwargs)
 
-        query_string = "&".join(f"{k}={v}" for k, v in query_params.items())
+        # URL-encode values. Critical for params whose values carry reserved
+        # query-string characters (`:`, `&`, etc.) — e.g. `replace=src:dst`,
+        # which SageMaker's bidi-stream `model_query_string` would otherwise
+        # mangle to an empty `replace: {}` on the stem side.
+        query_string = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in query_params.items())
 
         if keywords_list:
             keywords_params = "&".join(f"keywords={quote(kw)}" for kw in keywords_list)
@@ -364,6 +369,7 @@ class DeepgramSageMakerConnection:
                 self.first_final_at = now
             self.last_final_at = now
             self.transcript_count += 1
+            self.final_transcript_parts.append(transcript)
             self._write_fn(f"[Conn {self.connection_id}] ✓ {transcript} ({confidence:.1%})")
         else:
             self.interim_count += 1
@@ -383,6 +389,7 @@ class DeepgramSageMakerConnection:
             "bytes_sent": self.byte_count,
             "transcripts_final": self.transcript_count,
             "transcripts_interim": self.interim_count,
+            "combined_final_text": " ".join(self.final_transcript_parts).strip(),
             "message_type_counts": dict(self.message_type_counts),
             "unknown_message_count": self.unknown_message_count,
             "first_final_latency_s": _delta(self.session_start_at, self.first_final_at),
