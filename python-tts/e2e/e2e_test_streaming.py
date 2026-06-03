@@ -118,11 +118,14 @@ def default_scenarios() -> list[TTSStreamScenario]:
             tolerated_error_substring="encoding",
             notes="bytes-only check for non-linear16",
         ),
-        # NOTE: `speed` is exercised rigorously in the batch driver (clean 400 →
-        # PASS-WITH-NOTE on bundles without speed support). Over the websocket
-        # transport an unsupported `speed` degrades to a silent ~30 s flush
-        # timeout with no clean error to tolerate, so it is intentionally not a
-        # streaming scenario.
+        TTSStreamScenario(
+            name="speed_fast",
+            description="speed=1.4 over the websocket transport (voice control)",
+            extra={"speed": "1.4"},
+            tolerated_error_substring="Flushed-ack timeout",
+            notes="produces audio when the bundle supports speed; older bundles "
+                  "silently drop it (no audio → flush-ack timeout) → PASS-WITH-NOTE",
+        ),
         TTSStreamScenario(
             name="voice_alt",
             description="voice=aura-2-orion-en (alternate Aura-2 voice)",

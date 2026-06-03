@@ -270,10 +270,15 @@ class DeepgramSageMakerTTSConnection:
             await asyncio.wait_for(self._flushed_event.wait(), timeout=timeout)
             return True
         except asyncio.TimeoutError:
-            logger.error(
-                f"[Connection {self.connection_id}] Timed out waiting for Flushed "
-                f"acknowledgment after {timeout}s — marking connection failed"
+            msg = (
+                f"Flushed-ack timeout: no Flushed within {timeout}s "
+                "(server produced no audio for the flushed text)"
             )
+            logger.error(f"[Connection {self.connection_id}] {msg} — marking connection failed")
+            # Record it so the failure surfaces in summary()/--summary-jsonl
+            # (e.g. a query param the bundle silently drops, yielding no audio).
+            self.errored = True
+            self.error_messages.append(msg)
             self.is_active = False
             return False
 

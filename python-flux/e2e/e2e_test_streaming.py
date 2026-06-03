@@ -215,6 +215,19 @@ def default_scenarios(model: str = DEFAULT_MODEL) -> list[FluxScenario]:
             notes="keyterm prompting; presence is a soft signal",
         ),
         FluxScenario(
+            name="feature_profanity_filter",
+            description="--profanity-filter true (supported on Flux per docs)",
+            extra_args=["--profanity-filter", "true"],
+            # Older bundles (e.g. flux-multi-20260417) reject profanity_filter as
+            # an unknown query param → 400 at connect, surfaced to the client only
+            # as a generic stream error. Newer bundles accept it (clip has no
+            # profanity, so the transcript is unchanged and WER passes normally).
+            tolerated_error_substring="streaming the inference response",
+            notes="clip has no profanity → transcript unchanged when supported; "
+                  "PASS-WITH-NOTE on bundles that reject profanity_filter "
+                  "(https://developers.deepgram.com/docs/profanity-filter)",
+        ),
+        FluxScenario(
             name="feature_encoding_linear16",
             description="--encoding linear16 (explicit; matches the sample)",
             extra_args=["--encoding", "linear16"],
