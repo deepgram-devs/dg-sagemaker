@@ -128,10 +128,27 @@ my-flux-endpoint-dev     Creating   2026-03-10 08:00:13   2026-03-10 08:00:13
 | `--eager-eot-threshold 0.3-0.9` | *(disabled)* | Enables EagerEndOfTurn events; must be ≤ `--eot-threshold` |
 | `--eot-timeout-ms 500-10000` | `5000` (server default) | Max silence before forced EndOfTurn |
 | `--keyterms TERM1,TERM2` | *(none)* | Comma-separated keyterms for recognition boosting |
+| `--encoding ENC` | `linear16` | Audio encoding (`linear16`/`linear32`/`mulaw`/`alaw`/`opus`/`ogg-opus`) |
+| `--language-hints en,es` | *(none)* | Bias recognition to language codes — **multilingual model only** (`flux-general-multi`); sending to `flux-general-en` returns HTTP 400 |
+| `--profanity-filter true\|false` | *(server default `false`)* | Profanity filtering |
+| `--extra "k=v&k2=v2"` | *(none)* | Extra query params appended verbatim (e.g. `mip_opt_out=true&tag=foo`) |
+| `--summary-jsonl PATH` | *(none)* | Write a per-connection JSON summary (turns, Configure acks, errors) — consumed by the e2e driver |
+| `--batch-size N` | *(all at once)* | Open connections in batches of N (ramp-up) |
+| `--batch-delay SECONDS` | `0` | Delay between connection batches |
+| `--keepalive-interval SECONDS` | *(off)* | Send a `KeepAlive` every N seconds while streaming |
+| `--finalize-at-end` | *(off)* | Send `Finalize` after the last audio chunk to flush the final turn |
+| `--reconfigure-after SECONDS` | *(off)* | Send one mid-stream `Configure` after N seconds (with the `--reconfigure-*` values below) — exercises `ConfigureSuccess`/`ConfigureFailure` |
+| `--reconfigure-eot-threshold` / `--reconfigure-eager-eot-threshold` / `--reconfigure-eot-timeout-ms` / `--reconfigure-keyterms` / `--reconfigure-language-hints` | *(none)* | Values applied in the mid-stream `Configure` |
 | `--region REGION` | `us-east-1` | AWS region |
 | `--loop` | *(off)* | Loop the WAV file continuously |
 | `--duration SECONDS` | *(until file ends)* | Stop automatically after N seconds |
 | `--log-level LEVEL` | `INFO` | DEBUG / INFO / WARNING / ERROR / CRITICAL |
+
+> **Per-connection streaming:** in `file` mode each connection streams its own
+> independent copy of the WAV from the start (paced to real time), so
+> per-connection transcripts stay complete and comparable even under ramped
+> concurrency (`--batch-size`/`--batch-delay`). The `microphone` mode broadcasts
+> one shared capture to all connections.
 
 ### Examples
 
@@ -276,6 +293,60 @@ TurnResumed  EndOfTurn
    │              │
 [Speaking]   [Ready, turn_index++]
 ```
+
+## End-to-end correctness driver (`e2e/`)
+
+A run-everything correctness gate sits on top of `flux_stress.py` in `e2e/`,
+mirroring the STT suite. Flux is streaming-only, so there is a single driver:
+
+- **`e2e/e2e_test_streaming.py`** — downloads `https://dpgr.am/spacewalk.wav`
+  (~25 s English mono), multiplies it to a ~15 min long-form variant, drives
+  `flux_stress.py file` through ~17 scenarios, reads each connection's
+  `--summary-jsonl`, and validates the combined `EndOfTurn` transcript against
+  the known reference via **Word Error Rate** (≤ 5 % by default) plus
+  Flux-specific assertions (eager events emitted, `Configure` accepted/rejected,
+  language detection, expected-failure negative tests).
+
+```bash
+cd python-flux
+uv run e2e/e2e_test_streaming.py your-flux-endpoint --region us-east-1
+
+# list scenarios without running:
+uv run e2e/e2e_test_streaming.py --list
+
+# run a subset:
+uv run e2e/e2e_test_streaming.py your-flux-endpoint --scenarios basic_25s,feature_eager_eot
+```
+
+| Scenario | What it checks |
+|---|---|
+| `basic_25s` | 1 conn, 25 s file, defaults — baseline WER |
+| `concurrent_5x_25s` | 5 simultaneous connections |
+| `concurrent_10x_15min` | 10 connections on the ~15 min file — sustained load |
+| `ramp_10x_step5` | 10 conns in batches of 5, 2 s apart |
+| `feature_eot_threshold_high` | `--eot-threshold 0.9` (later, higher-confidence EoT) |
+| `feature_eot_timeout_ms` | `--eot-timeout-ms 600` (force EoT on short silence) |
+| `feature_eager_eot` | `--eager-eot-threshold 0.5` — asserts `EagerEndOfTurn` is emitted |
+| `feature_keyterm` | `--keyterms spacewalk,female` — presence check (soft) |
+| `feature_profanity_filter` | `--profanity-filter true` (no profanity in clip; smoke) |
+| `feature_encoding_linear16` | explicit `--encoding linear16` |
+| `feature_mip_opt_out` | `mip_opt_out=true` (smoke) |
+| `feature_configure_thresholds` | mid-stream `Configure` → asserts `ConfigureSuccess` |
+| `feature_configure_failure` | mid-stream `Configure` with `eager > eot` → asserts `ConfigureFailure` |
+| `feature_keepalive` | `--keepalive-interval 3` (smoke) |
+| `feature_finalize` | `--finalize-at-end` flushes the trailing turn |
+| `feature_multi_model_lang_hint` | `flux-general-multi` + `language_hint en` — PASS-WITH-NOTE if that model isn't bundled |
+| `negative_lang_hint_on_en` | `flux-general-en` + `language_hint es` — expects HTTP 400 (negative test) |
+
+Exit code 0 = all pass, non-zero = any scenario failed. Per-scenario
+stdout / stderr / summary-jsonl land in `<workdir>/logs/`; aggregated
+`results.json` at `<workdir>/results.json`. Default workdir:
+`/tmp/dg-sagemaker-e2e/flux/<timestamp>/`.
+
+Not covered (need re-encoded fixtures the suite doesn't generate): non-`linear16`
+encodings and alternate sample rates — the canonical sample is 16 kHz `linear16`.
+Parameter coverage is scoped to the Flux docs
+(https://developers.deepgram.com/docs/flux/) as of the June 2026 audit.
 
 ## Self-Hosted / SageMaker Notes
 

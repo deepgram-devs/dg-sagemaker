@@ -34,6 +34,8 @@ import os
 import signal
 import sys
 import time
+from collections import Counter
+from dataclasses import dataclass, field
 from typing import Callable
 import wave
 from queue import Queue
@@ -63,6 +65,39 @@ AUDIO_CHUNK_MS = 80
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class MidStreamPlan:
+    """Optional mid-stream control-message schedule for a file-mode stream.
+
+    Lets the e2e driver exercise Flux's distinctive in-band control messages
+    (Configure / KeepAlive / Finalize) deterministically while a WAV streams:
+
+    - ``keepalive_interval_s``: send a ``KeepAlive`` every N seconds.
+    - ``reconfigure_after_s``: send a single ``Configure`` once N seconds of
+      audio have streamed, applying any of the reconfigure_* fields. Useful for
+      asserting ``ConfigureSuccess`` (valid change) or ``ConfigureFailure``
+      (e.g. eager_eot_threshold > eot_threshold).
+    - ``finalize_at_end``: send a ``Finalize`` after the last audio chunk to
+      flush the final turn before ``CloseStream``.
+    """
+    keepalive_interval_s: float | None = None
+    reconfigure_after_s: float | None = None
+    reconfigure_eot_threshold: float | None = None
+    reconfigure_eager_eot_threshold: float | None = None
+    reconfigure_eot_timeout_ms: int | None = None
+    reconfigure_keyterms: list[str] | None = None
+    reconfigure_language_hints: list[str] | None = None
+    finalize_at_end: bool = False
+
+    @property
+    def active(self) -> bool:
+        return (
+            self.keepalive_interval_s is not None
+            or self.reconfigure_after_s is not None
+            or self.finalize_at_end
+        )
+
+
 # ---------------------------------------------------------------------------
 # Connection – Flux /v2/listen bidirectional stream
 # ---------------------------------------------------------------------------
@@ -85,10 +120,32 @@ class DeepgramFluxConnection:
         self.is_active = False
         self.response_task = None
         self.chunk_count = 0
+        self.byte_count = 0
         self.turn_index = 0
         self.transcript_parts: list[str] = []
         self.close_requested = False
         self.fatal_error_handler: Callable[[str], None] | None = None
+
+        # --- Structured per-connection telemetry (for --summary-jsonl + e2e) ---
+        # Flux is turn-based: the authoritative final text for a turn is the
+        # EndOfTurn transcript. We accumulate those for a WER-able combined
+        # transcript, and count every TurnInfo event + control-message ack so
+        # the e2e driver can assert on feature behaviour (eager events emitted,
+        # Configure accepted, etc.).
+        self.eot_transcripts: list[str] = []          # one per EndOfTurn
+        self.event_counts: Counter[str] = Counter()    # TurnInfo event histogram
+        self.languages_detected: set[str] = set()       # flux-general-multi only
+        self.languages_hinted: set[str] = set()          # flux-general-multi only
+        self.connected = False
+        self.request_id: str | None = None
+        self.configure_success = 0
+        self.configure_failure = 0
+        self.errored = False
+        self.error_messages: list[str] = []
+        self.session_start_at: float | None = None
+        self.first_eot_at: float | None = None
+        self.last_eot_at: float | None = None
+        self.close_observed_at: float | None = None
 
     async def start_session(
         self,
@@ -99,6 +156,8 @@ class DeepgramFluxConnection:
         eager_eot_threshold: float | None = None,
         eot_timeout_ms: int | None = None,
         keyterms: list[str] | None = None,
+        language_hints: list[str] | None = None,
+        extra: dict[str, str] | None = None,
     ):
         """
         Open a Flux /v2/listen bidirectional stream on SageMaker.
@@ -111,6 +170,11 @@ class DeepgramFluxConnection:
             eager_eot_threshold: Confidence for EagerEndOfTurn; must be ≤ eot_threshold.
             eot_timeout_ms: Max silence ms before forced EndOfTurn (500–10000).
             keyterms: List of keyterms for boosting recognition accuracy.
+            language_hints: Language codes to bias recognition (multilingual models);
+                emitted as repeated `language_hint=<code>` query params.
+            extra: Arbitrary additional query parameters appended verbatim
+                (e.g. {"mip_opt_out": "true", "tag": "e2e"}). Lets callers
+                exercise Flux params this client has no dedicated flag for.
         """
         query_params: dict[str, str | int | float] = {
             "model": model,
@@ -123,14 +187,24 @@ class DeepgramFluxConnection:
             query_params["eager_eot_threshold"] = eager_eot_threshold
         if eot_timeout_ms is not None:
             query_params["eot_timeout_ms"] = eot_timeout_ms
+        # --extra wins over the typed defaults above when keys collide, so a
+        # scenario can override e.g. encoding without a dedicated flag.
+        if extra:
+            query_params.update(extra)
 
-        query_string = "&".join(f"{k}={v}" for k, v in query_params.items())
+        query_string = "&".join(f"{k}={quote(str(v))}" for k, v in query_params.items())
 
+        # `keyterm` and `language_hint` are repeatable query params, so they are
+        # appended as separate key=value pairs rather than folded into the dict.
         if keyterms:
             keyterm_params = "&".join(f"keyterm={quote(kt)}" for kt in keyterms)
             query_string = f"{query_string}&{keyterm_params}"
+        if language_hints:
+            hint_params = "&".join(f"language_hint={quote(lh)}" for lh in language_hints)
+            query_string = f"{query_string}&{hint_params}"
 
         logger.debug(f"[Connection {self.connection_id}] Starting Flux session: {query_string}")
+        self.session_start_at = time.monotonic()
 
         stream_input = InvokeEndpointWithBidirectionalStreamInput(
             endpoint_name=self.endpoint_name,
@@ -162,6 +236,7 @@ class DeepgramFluxConnection:
             event = RequestStreamEventPayloadPart(value=payload)
             await self.stream.input_stream.send(event)
             self.chunk_count += 1
+            self.byte_count += len(audio_bytes)
             logger.debug(
                 f"[Connection {self.connection_id}] Sent chunk {self.chunk_count} "
                 f"({len(audio_bytes)} bytes)"
@@ -176,15 +251,22 @@ class DeepgramFluxConnection:
         eager_eot_threshold: float | None = None,
         eot_timeout_ms: int | None = None,
         keyterms: list[str] | None = None,
+        language_hints: list[str] | None = None,
     ):
         """
-        Send a Configure message to update thresholds or keyterms mid-stream.
+        Send a Configure message to update thresholds, keyterms, or language
+        hints mid-stream (per the Flux Configure schema).
 
         Args:
             eot_threshold: New EndOfTurn confidence threshold.
             eager_eot_threshold: New EagerEndOfTurn confidence threshold.
             eot_timeout_ms: New silence timeout in milliseconds.
-            keyterms: Replacement list of keyterms (replaces existing list).
+            keyterms: Replacement list of keyterms (replaces the existing list,
+                not merged). Note the query-string key is singular `keyterm`,
+                but the Configure-message field is plural `keyterms`.
+            language_hints: Replacement list of language codes (flux-general-multi
+                only). A non-empty list replaces; `[]` clears; ``None`` keeps the
+                current hints. Query-string key is singular `language_hint`.
         """
         if not self.is_active:
             return
@@ -200,6 +282,8 @@ class DeepgramFluxConnection:
             message["thresholds"] = thresholds
         if keyterms is not None:
             message["keyterms"] = keyterms
+        if language_hints is not None:
+            message["language_hints"] = language_hints
 
         await self._send_json(message)
         logger.debug(f"[Connection {self.connection_id}] Sent Configure: {message}")
@@ -306,7 +390,9 @@ class DeepgramFluxConnection:
         msg_type = msg.get("type")
 
         if msg_type == "Connected":
+            self.connected = True
             request_id = msg.get("request_id", "")
+            self.request_id = request_id or self.request_id
             seq = msg.get("sequence_id", 0)
             logger.info(
                 f"[Connection {self.connection_id}] Connected "
@@ -314,9 +400,14 @@ class DeepgramFluxConnection:
             )
 
         elif msg_type == "TurnInfo":
+            # request_id is also echoed on every TurnInfo — capture it in case
+            # the Connected frame was missed.
+            if not self.request_id and msg.get("request_id"):
+                self.request_id = msg.get("request_id")
             self._handle_turn_info(msg)
 
         elif msg_type == "ConfigureSuccess":
+            self.configure_success += 1
             thresholds = msg.get("thresholds", {})
             keyterms = msg.get("keyterms", [])
             logger.info(
@@ -325,9 +416,12 @@ class DeepgramFluxConnection:
             )
 
         elif msg_type == "ConfigureFailure":
+            self.configure_failure += 1
+            code = msg.get("code", "")
+            desc = msg.get("description", "")
             logger.warning(
-                f"[Connection {self.connection_id}] ConfigureFailure — "
-                "check that eager_eot_threshold ≤ eot_threshold"
+                f"[Connection {self.connection_id}] ConfigureFailure "
+                f"[{code}]: {desc or 'check that eager_eot_threshold ≤ eot_threshold'}"
             )
 
         elif msg_type == "Error":
@@ -336,6 +430,8 @@ class DeepgramFluxConnection:
             logger.error(
                 f"[Connection {self.connection_id}] Fatal server error [{code}]: {desc}"
             )
+            self.errored = True
+            self.error_messages.append(f"[{code}] {desc}".strip())
             self.is_active = False
 
         else:
@@ -360,6 +456,17 @@ class DeepgramFluxConnection:
         audio_start = msg.get("audio_window_start", 0.0)
         audio_end = msg.get("audio_window_end", 0.0)
         eot_confidence = msg.get("end_of_turn_confidence")
+
+        # Telemetry: histogram every event, and capture the multilingual
+        # language fields (flux-general-multi only) for the language-hint tests.
+        if event:
+            self.event_counts[event] += 1
+        langs = msg.get("languages")
+        if langs:
+            self.languages_detected.update(langs)
+        langs_hinted = msg.get("languages_hinted")
+        if langs_hinted:
+            self.languages_hinted.update(langs_hinted)
 
         logger.debug(
             f"[Connection {self.connection_id}] TurnInfo event={event} "
@@ -398,11 +505,56 @@ class DeepgramFluxConnection:
                 print(
                     f"[Conn {self.connection_id}] ✓ {transcript}{eot_str} [turn {turn_index}]"
                 )
+                # The EndOfTurn transcript is the authoritative final text for
+                # the turn — accumulate it for a WER-able combined transcript.
+                self.eot_transcripts.append(transcript.strip())
+                now = time.monotonic()
+                if self.first_eot_at is None:
+                    self.first_eot_at = now
+                self.last_eot_at = now
             self.turn_index = turn_index + 1
 
         else:
             if transcript.strip():
                 print(f"[Conn {self.connection_id}] [{event}] {transcript}")
+
+    # -------------------------------------------------------------------------
+    # Structured summary
+    # -------------------------------------------------------------------------
+
+    def summary(self) -> dict:
+        """Per-connection structured summary for the e2e drivers + load triage.
+
+        ``combined_final_text`` joins every EndOfTurn transcript in order — the
+        WER-able final text for the whole stream. The event histogram and
+        Configure-ack counts let the e2e driver assert feature behaviour
+        (eager events emitted, Configure accepted/rejected, etc.).
+        """
+        def _delta(a, b):
+            return round(b - a, 4) if (a is not None and b is not None) else None
+
+        return {
+            "connection_id": self.connection_id,
+            "request_id": self.request_id,
+            "connected": self.connected,
+            "errored": self.errored,
+            "error_messages": list(self.error_messages),
+            "chunks_sent": self.chunk_count,
+            "bytes_sent": self.byte_count,
+            "turns_eot": self.event_counts.get("EndOfTurn", 0),
+            "turns_eager": self.event_counts.get("EagerEndOfTurn", 0),
+            "turns_resumed": self.event_counts.get("TurnResumed", 0),
+            "starts_of_turn": self.event_counts.get("StartOfTurn", 0),
+            "updates": self.event_counts.get("Update", 0),
+            "event_counts": dict(self.event_counts),
+            "configure_success": self.configure_success,
+            "configure_failure": self.configure_failure,
+            "languages_detected": sorted(self.languages_detected),
+            "languages_hinted": sorted(self.languages_hinted),
+            "combined_final_text": " ".join(self.eot_transcripts).strip(),
+            "first_eot_latency_s": _delta(self.session_start_at, self.first_eot_at),
+            "session_duration_s": _delta(self.session_start_at, self.close_observed_at),
+        }
 
     # -------------------------------------------------------------------------
     # Session teardown
@@ -415,6 +567,9 @@ class DeepgramFluxConnection:
         Sends Finalize (to flush buffered audio) then CloseStream before
         closing the underlying transport and waiting for the response task.
         """
+        if self.close_observed_at is None:
+            self.close_observed_at = time.monotonic()
+
         if not self.is_active:
             return
 
@@ -525,20 +680,30 @@ class BaseFluxClient:
     async def initialize_connections(
         self,
         model: str = DEFAULT_MODEL,
+        encoding: str = "linear16",
         eot_threshold: float | None = None,
         eager_eot_threshold: float | None = None,
         eot_timeout_ms: int | None = None,
         keyterms: list[str] | None = None,
+        language_hints: list[str] | None = None,
+        extra: dict[str, str] | None = None,
     ):
         """
         Start all bidirectional Flux streaming connections in parallel.
 
+        Used by the microphone client (one shared capture broadcasts to all
+        connections). The file client uses ``initialize_and_stream`` instead so
+        each connection streams the file independently from the start.
+
         Args:
             model: Flux model variant (default: flux-general-en).
+            encoding: Audio encoding (default: linear16).
             eot_threshold: EndOfTurn confidence threshold (0.5–0.9).
             eager_eot_threshold: EagerEndOfTurn threshold; must be ≤ eot_threshold.
             eot_timeout_ms: Silence timeout ms before forced EndOfTurn (500–10000).
             keyterms: Keyterms for recognition boosting.
+            language_hints: Language codes (flux-general-multi only).
+            extra: Arbitrary additional query parameters appended verbatim.
         """
         if self.sample_rate is None:
             raise RuntimeError("sample_rate must be set before calling initialize_connections()")
@@ -557,10 +722,13 @@ class BaseFluxClient:
             conn.start_session(
                 sample_rate=self.sample_rate,
                 model=model,
+                encoding=encoding,
                 eot_threshold=eot_threshold,
                 eager_eot_threshold=eager_eot_threshold,
                 eot_timeout_ms=eot_timeout_ms,
                 keyterms=keyterms or [],
+                language_hints=language_hints or [],
+                extra=extra,
             )
             for conn in self.connections
         ])
@@ -608,6 +776,10 @@ class FileFluxClient(BaseFluxClient):
         self.channels: int | None = None
         self.sample_width: int | None = None
         self.duration_seconds: float | None = None
+        # Whole file loaded into memory once, then sliced into 80ms chunks per
+        # connection so every connection streams an identical, independent copy
+        # from the start (cf. STT) — gives clean per-connection WER + ramp.
+        self.audio_bytes: bytes | None = None
 
     def open_wav(self) -> wave.Wave_read:
         """Open and validate the WAV file, populating audio metadata."""
@@ -640,56 +812,191 @@ class FileFluxClient(BaseFluxClient):
         )
         return wf
 
-    async def stream_wav_audio(self, loop: bool = False):
-        """
-        Read the WAV file and broadcast 80ms audio chunks to all connections at
-        real-time pace.
+    def load_audio(self):
+        """Load + validate the WAV once into memory for per-connection streaming."""
+        wf = self.open_wav()
+        try:
+            self.audio_bytes = wf.readframes(wf.getnframes())
+        finally:
+            wf.close()
 
-        Args:
-            loop: Restart from the beginning when the file ends (until is_active=False).
+    async def initialize_and_stream(
+        self,
+        *,
+        batch_size: int = 0,
+        batch_delay: float = 0.0,
+        model: str = DEFAULT_MODEL,
+        encoding: str = "linear16",
+        eot_threshold: float | None = None,
+        eager_eot_threshold: float | None = None,
+        eot_timeout_ms: int | None = None,
+        keyterms: list[str] | None = None,
+        language_hints: list[str] | None = None,
+        extra: dict[str, str] | None = None,
+        loop: bool = False,
+        plan: MidStreamPlan | None = None,
+    ) -> list[asyncio.Task]:
         """
+        Open every connection and stream the full WAV to each independently.
+
+        Mirrors the STT stress client: connections open in batches of
+        ``batch_size`` (gated by a semaphore so the CRT isn't swamped by
+        simultaneous TCP handshakes), and each one starts streaming its own copy
+        of the audio from the start as soon as it's open — so per-connection
+        transcripts are complete and comparable even under ramped concurrency.
+
+        Returns one asyncio.Task per connection (each runs open → stream).
+        """
+        if self.sample_rate is None or self.audio_bytes is None:
+            raise RuntimeError("load_audio() must be called before initialize_and_stream()")
+        if not self.client:
+            self._initialize_client()
+
+        effective_batch = batch_size if batch_size > 0 else self.num_connections
+        num_batches = (self.num_connections + effective_batch - 1) // effective_batch
+        logger.info(
+            f"Initializing {self.num_connections} connection(s) in {num_batches} "
+            f"batch(es) of up to {effective_batch} (delay {batch_delay}s between batches)..."
+        )
+
+        self.is_active = True
+        streaming_tasks: list[asyncio.Task] = []
+        setup_sem = asyncio.Semaphore(effective_batch)
+
+        async def _open_and_stream(conn: DeepgramFluxConnection):
+            async with setup_sem:
+                try:
+                    await conn.start_session(
+                        sample_rate=self.sample_rate,
+                        model=model,
+                        encoding=encoding,
+                        eot_threshold=eot_threshold,
+                        eager_eot_threshold=eager_eot_threshold,
+                        eot_timeout_ms=eot_timeout_ms,
+                        keyterms=keyterms or [],
+                        language_hints=language_hints or [],
+                        extra=extra,
+                    )
+                except Exception as exc:
+                    # Capture connect-time failures (e.g. HTTP 400 for an
+                    # invalid param like language_hint on flux-general-en) so the
+                    # summary still records them for the e2e driver.
+                    logger.error(f"[Connection {conn.connection_id}] Failed to open: {exc}")
+                    conn.errored = True
+                    conn.error_messages.append(str(exc))
+                    if conn.close_observed_at is None:
+                        conn.close_observed_at = time.monotonic()
+                    return
+            try:
+                await self._stream_audio_to_connection(conn, loop=loop, plan=plan)
+            except Exception as exc:
+                logger.error(f"[Connection {conn.connection_id}] Streaming failed: {exc}")
+                conn.errored = True
+                conn.error_messages.append(str(exc))
+
+        try:
+            for batch_start in range(0, self.num_connections, effective_batch):
+                if not self.is_active:
+                    break
+                batch_end = min(batch_start + effective_batch, self.num_connections)
+                for i in range(batch_start, batch_end):
+                    conn = DeepgramFluxConnection(i + 1, self.client, self.endpoint_name)
+                    conn.fatal_error_handler = self.request_abort
+                    self.connections.append(conn)
+                    streaming_tasks.append(
+                        asyncio.create_task(_open_and_stream(conn), name=f"flux-conn-{i + 1}")
+                    )
+                logger.info(
+                    f"Opening batch {batch_start // effective_batch + 1}/{num_batches}: "
+                    f"connection(s) {batch_start + 1}–{batch_end}..."
+                )
+                if batch_end < self.num_connections and batch_delay > 0:
+                    await asyncio.sleep(batch_delay)
+        except Exception:
+            self.is_active = False
+            for task in streaming_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*streaming_tasks, return_exceptions=True)
+            raise
+
+        logger.info(f"All {self.num_connections} connection task(s) launched")
+        return streaming_tasks
+
+    async def _stream_audio_to_connection(
+        self,
+        conn: DeepgramFluxConnection,
+        loop: bool = False,
+        plan: MidStreamPlan | None = None,
+    ):
+        """Stream the in-memory WAV to a single connection, paced to real time.
+
+        Honors an optional :class:`MidStreamPlan` (KeepAlive cadence, a one-shot
+        mid-stream Configure, and a trailing Finalize) so the e2e driver can
+        exercise Flux's in-band control messages deterministically.
+        """
+        assert self.audio_bytes is not None
+        assert self.sample_rate is not None
+        plan = plan or MidStreamPlan()
         frames_per_chunk = int(self.sample_rate * AUDIO_CHUNK_MS / 1000)
-        bytes_per_frame = self.sample_width * self.channels
+        bytes_per_frame = (self.sample_width or 2) * (self.channels or 1)
+        bytes_per_chunk = frames_per_chunk * bytes_per_frame
         chunk_duration = frames_per_chunk / self.sample_rate  # seconds
 
-        play_count = 0
+        keepalive_interval = plan.keepalive_interval_s
+        reconfigure_after = plan.reconfigure_after_s
+
+        stream_start = time.monotonic()
         total_chunks = 0
+        play_count = 0
+        next_keepalive = keepalive_interval if keepalive_interval else None
+        reconfigure_pending = reconfigure_after is not None
 
-        while self.is_active:
-            wf = self.open_wav()
+        while conn.is_active and self.is_active:
             play_count += 1
-            logger.info(f"Streaming WAV file (pass {play_count})...")
-
-            chunk_start = time.monotonic()
-
-            while self.is_active:
-                raw = wf.readframes(frames_per_chunk)
-                if not raw:
-                    break  # End of file
-
-                active_connections = [c for c in self.connections if c.is_active]
-                if not active_connections:
-                    logger.warning("All connections have failed")
-                    self.is_active = False
+            for offset in range(0, len(self.audio_bytes), bytes_per_chunk):
+                if not (conn.is_active and self.is_active):
                     break
-
-                await asyncio.gather(*[c.send_audio_chunk(raw) for c in active_connections])
+                raw = self.audio_bytes[offset:offset + bytes_per_chunk]
+                await conn.send_audio_chunk(raw)
                 total_chunks += 1
 
-                # Pace delivery to real-time speed
-                elapsed = time.monotonic() - chunk_start
-                expected = total_chunks * chunk_duration
-                sleep_time = expected - elapsed
+                rel = time.monotonic() - stream_start
+
+                # One-shot mid-stream Configure.
+                if reconfigure_pending and reconfigure_after is not None and rel >= reconfigure_after:
+                    await conn.send_configure(
+                        eot_threshold=plan.reconfigure_eot_threshold,
+                        eager_eot_threshold=plan.reconfigure_eager_eot_threshold,
+                        eot_timeout_ms=plan.reconfigure_eot_timeout_ms,
+                        keyterms=plan.reconfigure_keyterms,
+                        language_hints=plan.reconfigure_language_hints,
+                    )
+                    reconfigure_pending = False
+
+                # Periodic KeepAlive.
+                if next_keepalive is not None and keepalive_interval and rel >= next_keepalive:
+                    await conn.send_keep_alive()
+                    next_keepalive += keepalive_interval
+
+                # Pace delivery to real-time speed.
+                sleep_time = (total_chunks * chunk_duration) - rel
                 if sleep_time > 0:
                     await asyncio.sleep(sleep_time)
-
-            wf.close()
-            logger.debug(f"End of WAV file (pass {play_count})")
 
             if not loop:
                 break
 
-        logger.info(f"Finished streaming: {play_count} pass(es), {total_chunks} chunks total")
+        # Flush the final turn before CloseStream when asked.
+        if plan.finalize_at_end and conn.is_active:
+            await conn.send_finalize()
+            # Give the server a moment to emit the forced EndOfTurn before teardown.
+            await asyncio.sleep(1.5)
+
+        logger.debug(
+            f"[Connection {conn.connection_id}] Finished streaming "
+            f"({play_count} pass(es), {total_chunks} chunks)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -870,6 +1177,40 @@ def _add_common_args(parser: argparse.ArgumentParser):
         help="Comma-separated list of keyterms to boost recognition accuracy",
     )
     parser.add_argument(
+        "--encoding",
+        default="linear16",
+        help="Audio encoding query param (default: linear16). "
+             "Flux accepts linear16/linear32/mulaw/alaw/opus/ogg-opus.",
+    )
+    parser.add_argument(
+        "--language-hints",
+        default="",
+        metavar="en,es",
+        help="Comma-separated language codes to bias recognition. Only valid with "
+             "the multilingual model (flux-general-multi); sending to flux-general-en "
+             "returns HTTP 400.",
+    )
+    parser.add_argument(
+        "--profanity-filter",
+        default=None,
+        choices=["true", "false"],
+        help="Enable profanity filtering (default: server default of false)",
+    )
+    parser.add_argument(
+        "--extra",
+        default="",
+        metavar="k=v&k2=v2",
+        help="Extra Flux query parameters appended verbatim (e.g. "
+             "'mip_opt_out=true&tag=e2e'). Overrides typed defaults on key collision.",
+    )
+    parser.add_argument(
+        "--summary-jsonl",
+        default=None,
+        metavar="PATH",
+        help="Write a per-connection JSON summary (one object per line) for "
+             "programmatic inspection by the e2e drivers.",
+    )
+    parser.add_argument(
         "--region",
         default=DEFAULT_REGION,
         help=f"AWS region (default: {DEFAULT_REGION})",
@@ -922,9 +1263,78 @@ def _print_banner(args, extra_lines: list[str]):
         print(f"Eager EoT:     {args.eager_eot_threshold}")
     if args.eot_timeout_ms is not None:
         print(f"EoT Timeout:   {args.eot_timeout_ms}ms")
-    keyterms = [kt.strip() for kt in args.keyterms.split(",") if kt.strip()] if args.keyterms else []
+    keyterms = _split_csv(args.keyterms)
     if keyterms:
         print(f"Keyterms:      {', '.join(keyterms)}")
+    if getattr(args, "encoding", None) and args.encoding != "linear16":
+        print(f"Encoding:      {args.encoding}")
+    language_hints = _split_csv(getattr(args, "language_hints", ""))
+    if language_hints:
+        print(f"Lang hints:    {', '.join(language_hints)}")
+    if getattr(args, "profanity_filter", None) is not None:
+        print(f"Profanity:     {args.profanity_filter}")
+    if getattr(args, "extra", ""):
+        print(f"Extra params:  {args.extra}")
+    print("=" * 60)
+
+
+def _split_csv(value: str | None) -> list[str]:
+    """Split a comma-separated CLI value into a clean list (empty → [])."""
+    if not value:
+        return []
+    return [tok.strip() for tok in value.split(",") if tok.strip()]
+
+
+def _parse_extra(raw: str) -> dict[str, str]:
+    """Parse a `k=v&k2=v2` --extra string into a dict. Raises ValueError on bad form."""
+    extra: dict[str, str] = {}
+    for pair in (raw or "").split("&"):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            raise ValueError(f"--extra entry '{pair}' must be in k=v form")
+        k, v = pair.split("=", 1)
+        extra[k.strip()] = v.strip()
+    return extra
+
+
+def _write_summary_jsonl(client: BaseFluxClient, path: str):
+    """Write one JSON summary object per connection to `path` (for the e2e drivers)."""
+    try:
+        with open(path, "w") as f:
+            for conn in client.connections:
+                f.write(json.dumps(conn.summary()) + "\n")
+        print(f"Per-connection summary written: {path}")
+    except OSError as e:
+        logger.error(f"Could not write --summary-jsonl {path}: {e}")
+
+
+def _print_stream_summary(client: BaseFluxClient):
+    """Print an aggregate stream summary across all connections."""
+    conns = client.connections
+    errored = [c for c in conns if c.errored]
+    total_eot = sum(c.event_counts.get("EndOfTurn", 0) for c in conns)
+    total_eager = sum(c.event_counts.get("EagerEndOfTurn", 0) for c in conns)
+    cfg_ok = sum(c.configure_success for c in conns)
+    cfg_fail = sum(c.configure_failure for c in conns)
+    print("\n" + "=" * 60)
+    print("STREAM SUMMARY")
+    print("=" * 60)
+    print(f"Total connections:  {len(conns)}")
+    print(f"Errored:            {len(errored)}")
+    print(f"EndOfTurn total:    {total_eot}")
+    print(f"EagerEndOfTurn:     {total_eager}")
+    if cfg_ok or cfg_fail:
+        print(f"Configure ok/fail:  {cfg_ok}/{cfg_fail}")
+    if errored:
+        msgs: dict[str, int] = {}
+        for c in errored:
+            for m in c.error_messages:
+                msgs[m] = msgs.get(m, 0) + 1
+        print("Errors:")
+        for m, n in msgs.items():
+            print(f"  {'(x%d) ' % n if n > 1 else ''}{m}")
     print("=" * 60)
 
 
@@ -932,8 +1342,33 @@ def _print_banner(args, extra_lines: list[str]):
 # Subcommand handlers
 # ---------------------------------------------------------------------------
 
+def _mid_stream_plan_from_args(args) -> MidStreamPlan:
+    """Build a MidStreamPlan from the file-subcommand control-message flags."""
+    return MidStreamPlan(
+        keepalive_interval_s=getattr(args, "keepalive_interval", None),
+        reconfigure_after_s=getattr(args, "reconfigure_after", None),
+        reconfigure_eot_threshold=getattr(args, "reconfigure_eot_threshold", None),
+        reconfigure_eager_eot_threshold=getattr(args, "reconfigure_eager_eot_threshold", None),
+        reconfigure_eot_timeout_ms=getattr(args, "reconfigure_eot_timeout_ms", None),
+        reconfigure_keyterms=_split_csv(getattr(args, "reconfigure_keyterms", "")) or None,
+        reconfigure_language_hints=_split_csv(getattr(args, "reconfigure_language_hints", "")) or None,
+        finalize_at_end=getattr(args, "finalize_at_end", False),
+    )
+
+
 async def run_file(args) -> int:
-    keyterms = [kt.strip() for kt in args.keyterms.split(",") if kt.strip()] if args.keyterms else []
+    keyterms = _split_csv(args.keyterms)
+    language_hints = _split_csv(args.language_hints)
+    try:
+        extra = _parse_extra(args.extra)
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        return 1
+    if args.profanity_filter is not None:
+        extra.setdefault("profanity_filter", args.profanity_filter)
+
+    batch_size = getattr(args, "batch_size", 0) or 0
+    batch_delay = getattr(args, "batch_delay", 0.0) or 0.0
 
     client = FileFluxClient(
         endpoint_name=args.endpoint_name,
@@ -942,10 +1377,9 @@ async def run_file(args) -> int:
         num_connections=args.connections,
     )
 
-    # Validate WAV file early, before printing the banner
+    # Validate + load the WAV once before printing the banner.
     try:
-        wf = client.open_wav()
-        wf.close()
+        client.load_audio()
     except Exception as e:
         print(f"ERROR: {e}")
         return 1
@@ -965,6 +1399,8 @@ async def run_file(args) -> int:
         f"Limit:         {limit_str}",
     ])
 
+    plan = _mid_stream_plan_from_args(args)
+
     def signal_handler(sig, frame):
         print("\n\nReceived interrupt signal, stopping...")
         client.is_active = False
@@ -973,12 +1409,19 @@ async def run_file(args) -> int:
     exit_code = 0
 
     try:
-        await client.initialize_connections(
+        streaming_tasks = await client.initialize_and_stream(
+            batch_size=batch_size,
+            batch_delay=batch_delay,
             model=args.model,
+            encoding=args.encoding,
             eot_threshold=args.eot_threshold,
             eager_eot_threshold=args.eager_eot_threshold,
             eot_timeout_ms=args.eot_timeout_ms,
             keyterms=keyterms,
+            language_hints=language_hints,
+            extra=extra,
+            loop=args.loop,
+            plan=plan if plan.active else None,
         )
 
         print("\n" + "=" * 60)
@@ -990,16 +1433,19 @@ async def run_file(args) -> int:
             print("   (Press Ctrl+C to stop)")
         print("=" * 60 + "\n")
 
-        stream_coro = client.stream_wav_audio(loop=args.loop)
-
+        all_streaming = asyncio.gather(*streaming_tasks, return_exceptions=True)
         if args.duration:
             try:
-                await asyncio.wait_for(stream_coro, timeout=args.duration)
+                await asyncio.wait_for(all_streaming, timeout=args.duration)
             except asyncio.TimeoutError:
                 print(f"\nDuration of {args.duration}s reached, stopping...")
                 client.is_active = False
+                for t in streaming_tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*streaming_tasks, return_exceptions=True)
         else:
-            await stream_coro
+            await all_streaming
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
@@ -1008,7 +1454,9 @@ async def run_file(args) -> int:
         exit_code = 1
     finally:
         await client.end_all_sessions()
-        print("\n" + "=" * 60)
+        _print_stream_summary(client)
+        if args.summary_jsonl:
+            _write_summary_jsonl(client, args.summary_jsonl)
 
     if client.abort_reason:
         print("ERROR: Aborting early after a SageMaker response stream failure.")
@@ -1023,7 +1471,7 @@ async def run_file(args) -> int:
         return exit_code
 
     logger.info("Stress test complete")
-    return 0
+    return 0 if not any(c.errored for c in client.connections) else 1
 
 
 async def run_microphone(args) -> int:
@@ -1048,7 +1496,15 @@ async def run_microphone(args) -> int:
         pa.terminate()
         return 0
 
-    keyterms = [kt.strip() for kt in args.keyterms.split(",") if kt.strip()] if args.keyterms else []
+    keyterms = _split_csv(args.keyterms)
+    language_hints = _split_csv(args.language_hints)
+    try:
+        extra = _parse_extra(args.extra)
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        return 1
+    if args.profanity_filter is not None:
+        extra.setdefault("profanity_filter", args.profanity_filter)
 
     client = MicFluxClient(
         endpoint_name=args.endpoint_name,
@@ -1077,10 +1533,13 @@ async def run_microphone(args) -> int:
     try:
         await client.initialize_connections(
             model=args.model,
+            encoding=args.encoding,
             eot_threshold=args.eot_threshold,
             eager_eot_threshold=args.eager_eot_threshold,
             eot_timeout_ms=args.eot_timeout_ms,
             keyterms=keyterms,
+            language_hints=language_hints,
+            extra=extra,
         )
 
         await client.start_microphone()
@@ -1112,7 +1571,9 @@ async def run_microphone(args) -> int:
         exit_code = 1
     finally:
         await client.end_all_sessions()
-        print("\n" + "=" * 60)
+        _print_stream_summary(client)
+        if args.summary_jsonl:
+            _write_summary_jsonl(client, args.summary_jsonl)
 
     if client.abort_reason:
         print("ERROR: Aborting early after a SageMaker response stream failure.")
@@ -1127,7 +1588,7 @@ async def run_microphone(args) -> int:
         return exit_code
 
     logger.info("Stress test complete")
-    return 0
+    return 0 if not any(c.errored for c in client.connections) else 1
 
 
 # ---------------------------------------------------------------------------
@@ -1289,6 +1750,73 @@ async def main() -> int:
         "--loop",
         action="store_true",
         help="Loop the WAV file continuously until --duration is reached or Ctrl+C",
+    )
+    file_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Open connections in batches of N (ramp-up). Default: all at once.",
+    )
+    file_parser.add_argument(
+        "--batch-delay",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="Seconds to wait between opening connection batches (default: 0)",
+    )
+    # --- Mid-stream control-message hooks (Flux-distinctive protocol features) ---
+    file_parser.add_argument(
+        "--keepalive-interval",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Send a KeepAlive message every N seconds while streaming",
+    )
+    file_parser.add_argument(
+        "--finalize-at-end",
+        action="store_true",
+        help="Send a Finalize message after the last audio chunk to flush the final turn",
+    )
+    file_parser.add_argument(
+        "--reconfigure-after",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Send one mid-stream Configure after N seconds of audio, applying any "
+             "--reconfigure-* values below (exercises ConfigureSuccess/ConfigureFailure)",
+    )
+    file_parser.add_argument(
+        "--reconfigure-eot-threshold",
+        type=float,
+        default=None,
+        help="eot_threshold to apply in the mid-stream Configure",
+    )
+    file_parser.add_argument(
+        "--reconfigure-eager-eot-threshold",
+        type=float,
+        default=None,
+        help="eager_eot_threshold to apply in the mid-stream Configure "
+             "(set > --reconfigure-eot-threshold to force a ConfigureFailure)",
+    )
+    file_parser.add_argument(
+        "--reconfigure-eot-timeout-ms",
+        type=int,
+        default=None,
+        help="eot_timeout_ms to apply in the mid-stream Configure",
+    )
+    file_parser.add_argument(
+        "--reconfigure-keyterms",
+        default="",
+        metavar="TERM1,TERM2",
+        help="Replacement keyterms list to apply in the mid-stream Configure",
+    )
+    file_parser.add_argument(
+        "--reconfigure-language-hints",
+        default="",
+        metavar="en,es",
+        help="Replacement language_hints to apply in the mid-stream Configure "
+             "(flux-general-multi only)",
     )
 
     # -- microphone subcommand ------------------------------------------------

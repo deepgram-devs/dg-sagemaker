@@ -14,10 +14,13 @@ import asyncio
 import argparse
 import json
 import logging
+import math
 import os
 import signal
 import sys
 import time
+import wave
+from array import array
 from queue import Queue
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
@@ -31,17 +34,17 @@ from aws_sdk_sagemaker_runtime_http2.models import (
 from smithy_aws_core.identity import EnvironmentCredentialsResolver
 from smithy_aws_core.auth.sigv4 import SigV4AuthScheme
 
+# pyaudio is only needed for local speaker playback. The e2e drivers run this
+# client headless (--no-playback), so import it lazily and degrade gracefully
+# when it (or PortAudio) is unavailable.
 try:
     import pyaudio
 except ImportError:
-    print("ERROR: pyaudio is required for audio playback")
-    print("Install it with: pip install pyaudio")
-    print("On macOS, you may need: brew install portaudio && pip install pyaudio")
-    sys.exit(1)
+    pyaudio = None  # type: ignore[assignment]
 
 # Configuration constants
 DEFAULT_REGION = "us-east-2"
-AUDIO_FORMAT = pyaudio.paInt16  # 16-bit PCM
+AUDIO_FORMAT = pyaudio.paInt16 if pyaudio else 8  # paInt16 == 8; 16-bit PCM
 CHANNELS = 1  # Mono audio
 SAMPLE_RATE = 24000  # 24kHz sample rate (typical for TTS)
 
@@ -55,12 +58,17 @@ class DeepgramSageMakerTTSConnection:
     Each connection handles its own stream and audio response processing.
     """
 
-    def __init__(self, connection_id, client, endpoint_name, should_playback=False, boto_session=None):
+    def __init__(self, connection_id, client, endpoint_name, should_playback=False,
+                 boto_session=None, collect_audio=False):
         self.connection_id = connection_id
         self.client = client
         self.endpoint_name = endpoint_name
         self.should_playback = should_playback
         self.boto_session = boto_session
+        # When True, accumulate the raw synthesized audio so the e2e drivers can
+        # validate it (byte count, RMS energy, duration). Kept off for plain
+        # load testing to avoid unbounded memory growth on long runs.
+        self.collect_audio = collect_audio
         self.stream = None
         self.output_stream = None
         self.is_active = False
@@ -73,6 +81,19 @@ class DeepgramSageMakerTTSConnection:
         self._flushed_event = asyncio.Event()
         self._flushed_event.set()
         self._last_flush_time = 0.0
+
+        # --- Structured per-connection telemetry (for --summary-jsonl + e2e) ---
+        self.encoding = "linear16"        # captured from start_session kwargs
+        self.audio_data = bytearray()      # raw audio bytes (when collect_audio)
+        self.flushed_count = 0
+        self.cleared_count = 0
+        self.warnings: list[str] = []
+        self.errored = False
+        self.error_messages: list[str] = []
+        self.metadata_model: str | None = None
+        self.request_id: str | None = None
+        self.session_start_at: float | None = None
+        self.first_audio_at: float | None = None
 
     async def start_session(self, voice="aura-2-thalia-en", **kwargs):
         """
@@ -89,6 +110,11 @@ class DeepgramSageMakerTTSConnection:
             "sample_rate": SAMPLE_RATE,
         }
         query_params.update(kwargs)
+
+        # Remember the encoding so the summary knows whether the audio bytes are
+        # int16 PCM (RMS-computable) or a compressed/companded codec.
+        self.encoding = str(query_params.get("encoding", "linear16"))
+        self.session_start_at = time.monotonic()
 
         # Convert dict to query string
         query_string = "&".join(f"{k}={v}" for k, v in query_params.items())
@@ -325,6 +351,102 @@ class DeepgramSageMakerTTSConnection:
             print(f"{indent}  response_body (raw) = {body!r}", file=sys.stderr)
             logger.error(f"{log_prefix}{indent}  response_body (raw) = {body!r}")
 
+    def _handle_server_data(self, data: bytes) -> bool:
+        """Dispatch one server frame. Returns True if it was an audio frame.
+
+        A single code path for both the live receive loop and the post-close
+        drain so telemetry (Flushed/Warning/Error/Metadata counts, audio bytes)
+        can never diverge between the two.
+        """
+        # Try to parse as a JSON control message first.
+        try:
+            message = json.loads(data.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            message = None
+
+        if isinstance(message, dict) and "type" in message:
+            message_type = message.get("type", "Unknown")
+
+            if message_type == "Metadata":
+                self.metadata_model = message.get("model_name") or self.metadata_model
+                self.request_id = message.get("request_id") or self.request_id
+                uuids = message.get("additional_model_uuids") or []
+                logger.debug(
+                    f"[Connection {self.connection_id}] Metadata: "
+                    f"request_id={message.get('request_id')} "
+                    f"model={message.get('model_name')} "
+                    f"version={message.get('model_version')} "
+                    f"model_uuid={message.get('model_uuid')}"
+                    + (f" additional_uuids={uuids}" if uuids else "")
+                )
+
+            elif message_type == "Warning":
+                warn_code = message.get("warn_code") or message.get("code", "")
+                warn_msg = message.get("warn_msg") or message.get("description", "")
+                self.warnings.append(f"[{warn_code}] {warn_msg}".strip())
+                logger.warning(
+                    f"[Connection {self.connection_id}] Warning [{warn_code}]: {warn_msg}"
+                )
+                if warn_code == "EXCESSIVE_FLUSH":
+                    # Server rejected the last Flush (rate limit). Unblock
+                    # wait_for_flushed() so the send loop doesn't time out and
+                    # kill the connection; defer the next attempt a full interval.
+                    self._last_flush_time = time.monotonic()
+                    self._flushed_event.set()
+
+            elif message_type == "Flushed":
+                self.flushed_count += 1
+                self._flushed_event.set()
+                logger.debug(
+                    f"[Connection {self.connection_id}] Flushed "
+                    f"(sequence_id={message.get('sequence_id')})"
+                )
+
+            elif message_type == "Cleared":
+                self.cleared_count += 1
+                logger.debug(
+                    f"[Connection {self.connection_id}] Cleared "
+                    f"(sequence_id={message.get('sequence_id')})"
+                )
+
+            elif message_type == "Error":
+                # Not part of the Deepgram TTS spec; may originate from the
+                # SageMaker inference layer.
+                err_code = message.get("err_code") or message.get("code", "unknown")
+                description = message.get("description") or message.get("message", "No description provided")
+                err_msg = message.get("err_msg", "")
+                detail = f" — {err_msg}" if err_msg else ""
+                self.errored = True
+                self.error_messages.append(f"[{err_code}] {description}{detail}".strip())
+                logger.error(
+                    f"[Connection {self.connection_id}] Error [{err_code}]: {description}{detail}"
+                )
+                print(
+                    f"ERROR [Connection {self.connection_id}]: [{err_code}] {description}{detail}",
+                    file=sys.stderr,
+                )
+
+            else:
+                logger.warning(
+                    f"[Connection {self.connection_id}] Unrecognised message type: "
+                    f"{message_type!r} — {message}"
+                )
+            return False
+
+        # Not a JSON control message — treat as binary audio data.
+        self.bytes_received += len(data)
+        if self.first_audio_at is None:
+            self.first_audio_at = time.monotonic()
+        if self.collect_audio:
+            self.audio_data.extend(data)
+        if self.should_playback:
+            self.audio_buffer.put(data)
+        logger.debug(
+            f"[Connection {self.connection_id}] Received {len(data)} bytes of audio "
+            f"(total: {self.bytes_received})"
+        )
+        return True
+
     async def _process_audio_responses(self):
         """Process streaming responses from Deepgram according to API specification"""
         try:
@@ -332,98 +454,13 @@ class DeepgramSageMakerTTSConnection:
 
             while self.is_active:
                 result = await self.output_stream.receive()
-
                 if result is None:
                     logger.debug(f"[Connection {self.connection_id}] No more responses from server")
                     break
-
                 if result.value and result.value.bytes_:
-                    data = result.value.bytes_
+                    self._handle_server_data(result.value.bytes_)
 
-                    # Try to parse as JSON control message first
-                    is_json_message = False
-                    try:
-                        message = json.loads(data.decode('utf-8'))
-                        is_json_message = True
-                        message_type = message.get('type', 'Unknown')
-
-                        if message_type == 'Metadata':
-                            uuids = message.get('additional_model_uuids') or []
-                            logger.debug(
-                                f"[Connection {self.connection_id}] Metadata: "
-                                f"request_id={message.get('request_id')} "
-                                f"model={message.get('model_name')} "
-                                f"version={message.get('model_version')} "
-                                f"model_uuid={message.get('model_uuid')}"
-                                + (f" additional_uuids={uuids}" if uuids else "")
-                            )
-
-                        elif message_type == 'Warning':
-                            warn_code = message.get('warn_code', '')
-                            warn_msg = message.get('warn_msg', '')
-                            logger.warning(
-                                f"[Connection {self.connection_id}] Warning "
-                                f"[{warn_code}]: {warn_msg}"
-                            )
-                            if warn_code == 'EXCESSIVE_FLUSH':
-                                # The server rejected the last Flush due to rate limiting.
-                                # Unblock wait_for_flushed() so the send loop does not time
-                                # out and kill the connection, and reset the flush timer so
-                                # the next attempt is deferred by a full interval.
-                                self._last_flush_time = time.monotonic()
-                                self._flushed_event.set()
-
-                        elif message_type == 'Flushed':
-                            self._flushed_event.set()
-                            logger.debug(
-                                f"[Connection {self.connection_id}] Flushed "
-                                f"(sequence_id={message.get('sequence_id')})"
-                            )
-
-                        elif message_type == 'Cleared':
-                            logger.debug(
-                                f"[Connection {self.connection_id}] Cleared "
-                                f"(sequence_id={message.get('sequence_id')})"
-                            )
-
-                        elif message_type == 'Error':
-                            # Not part of the Deepgram TTS spec; may originate from the
-                            # SageMaker inference layer.
-                            err_code = message.get('err_code') or message.get('code', 'unknown')
-                            description = message.get('description') or message.get('message', 'No description provided')
-                            err_msg = message.get('err_msg', '')
-                            detail = f" — {err_msg}" if err_msg else ""
-                            logger.error(
-                                f"[Connection {self.connection_id}] Error "
-                                f"[{err_code}]: {description}{detail}"
-                            )
-                            print(
-                                f"ERROR [Connection {self.connection_id}]: [{err_code}] {description}{detail}",
-                                file=sys.stderr
-                            )
-
-                        else:
-                            logger.warning(
-                                f"[Connection {self.connection_id}] Unrecognised message type: "
-                                f"{message_type!r} — {message}"
-                            )
-
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        # Not JSON - treat as binary audio data
-                        is_json_message = False
-
-                    # If not a JSON message, treat as audio data
-                    if not is_json_message:
-                        self.bytes_received += len(data)
-
-                        if self.should_playback:
-                            # Buffer audio for playback
-                            self.audio_buffer.put(data)
-                            logger.debug(f"[Connection {self.connection_id}] Received {len(data)} bytes of audio (total: {self.bytes_received})")
-                        else:
-                            logger.debug(f"[Connection {self.connection_id}] Received {len(data)} bytes of audio (discarded)")
-
-            # Continue processing any remaining buffered responses
+            # Continue processing any remaining buffered responses after close.
             logger.debug(f"[Connection {self.connection_id}] Processing any remaining buffered responses...")
             remaining_count = 0
             while remaining_count < 20:
@@ -431,71 +468,9 @@ class DeepgramSageMakerTTSConnection:
                     result = await asyncio.wait_for(self.output_stream.receive(), timeout=0.5)
                     if result is None:
                         break
-
                     if result.value and result.value.bytes_:
-                        data = result.value.bytes_
-
-                        # Try to parse as JSON control message
-                        is_json_message = False
-                        try:
-                            message = json.loads(data.decode('utf-8'))
-                            is_json_message = True
-                            message_type = message.get('type', 'Unknown')
-
-                            if message_type == 'Metadata':
-                                uuids = message.get('additional_model_uuids') or []
-                                logger.debug(
-                                    f"[Connection {self.connection_id}] Metadata: "
-                                    f"request_id={message.get('request_id')} "
-                                    f"model={message.get('model_name')} "
-                                    f"version={message.get('model_version')} "
-                                    f"model_uuid={message.get('model_uuid')}"
-                                    + (f" additional_uuids={uuids}" if uuids else "")
-                                )
-                            elif message_type == 'Warning':
-                                logger.warning(
-                                    f"[Connection {self.connection_id}] Warning "
-                                    f"[{message.get('code')}]: {message.get('description')}"
-                                )
-                            elif message_type in ('Flushed', 'Cleared'):
-                                logger.debug(
-                                    f"[Connection {self.connection_id}] {message_type} "
-                                    f"(sequence_id={message.get('sequence_id')})"
-                                )
-                            elif message_type == 'Error':
-                                err_code = message.get('err_code') or message.get('code', 'unknown')
-                                description = message.get('description') or message.get('message', 'No description provided')
-                                err_msg = message.get('err_msg', '')
-                                detail = f" — {err_msg}" if err_msg else ""
-                                logger.error(
-                                    f"[Connection {self.connection_id}] Error "
-                                    f"[{err_code}]: {description}{detail}"
-                                )
-                                print(
-                                    f"ERROR [Connection {self.connection_id}]: [{err_code}] {description}{detail}",
-                                    file=sys.stderr
-                                )
-                            else:
-                                logger.warning(
-                                    f"[Connection {self.connection_id}] Unrecognised message type: "
-                                    f"{message_type!r} — {message}"
-                                )
-
-                        except (json.JSONDecodeError, UnicodeDecodeError):
-                            # Not JSON - treat as binary audio data
-                            is_json_message = False
-
-                        # If not a JSON message, treat as audio data
-                        if not is_json_message:
-                            self.bytes_received += len(data)
+                        if self._handle_server_data(result.value.bytes_):
                             remaining_count += 1
-
-                            if self.should_playback:
-                                self.audio_buffer.put(data)
-                                logger.debug(f"[Connection {self.connection_id}] Received {len(data)} bytes of audio (total: {self.bytes_received})")
-                            else:
-                                logger.debug(f"[Connection {self.connection_id}] Received {len(data)} bytes of audio (discarded)")
-
                 except asyncio.TimeoutError:
                     break
 
@@ -504,6 +479,79 @@ class DeepgramSageMakerTTSConnection:
 
         except Exception as e:
             self._log_exception_details(e)
+
+    # -------------------------------------------------------------------------
+    # Structured summary + audio validation helpers
+    # -------------------------------------------------------------------------
+
+    def audio_stats(self) -> dict:
+        """Compute byte count, RMS, peak, and duration of the collected audio.
+
+        RMS/peak are only meaningful for ``linear16`` (int16 PCM); for companded
+        or compressed encodings (mulaw/alaw/mp3/…) they are reported as ``None``
+        and the e2e driver falls back to a non-empty-bytes check.
+        """
+        n_bytes = len(self.audio_data) if self.collect_audio else self.bytes_received
+        stats: dict = {"bytes": n_bytes, "rms": None, "peak": None, "duration_s": None}
+        if not self.collect_audio or not self.audio_data:
+            return stats
+        sample_rate = self._summary_sample_rate
+        if self.encoding == "linear16":
+            usable = len(self.audio_data) - (len(self.audio_data) % 2)
+            samples = array("h")
+            samples.frombytes(bytes(self.audio_data[:usable]))
+            if samples:
+                peak = max(abs(s) for s in samples)
+                rms = math.sqrt(sum(s * s for s in samples) / len(samples))
+                stats["rms"] = round(rms, 2)
+                stats["peak"] = peak
+                stats["duration_s"] = round(len(samples) / sample_rate, 3)
+        return stats
+
+    # The driver tells the connection the sample rate it requested (defaults to
+    # the module SAMPLE_RATE) so duration can be derived from int16 sample count.
+    _summary_sample_rate: int = SAMPLE_RATE
+
+    def save_audio(self, path) -> None:
+        """Write the collected audio to `path` (WAV for linear16, else raw bytes)."""
+        if not self.collect_audio or not self.audio_data:
+            return
+        from pathlib import Path as _Path
+        p = _Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if self.encoding == "linear16":
+            with wave.open(str(p), "wb") as wf:
+                wf.setnchannels(CHANNELS)
+                wf.setsampwidth(2)
+                wf.setframerate(self._summary_sample_rate)
+                wf.writeframes(bytes(self.audio_data))
+        else:
+            p.write_bytes(bytes(self.audio_data))
+
+    def summary(self) -> dict:
+        """Per-connection structured summary for the e2e drivers."""
+        def _delta(a, b):
+            return round(b - a, 4) if (a is not None and b is not None) else None
+
+        stats = self.audio_stats()
+        return {
+            "connection_id": self.connection_id,
+            "request_id": self.request_id,
+            "errored": self.errored,
+            "error_messages": list(self.error_messages),
+            "warnings": list(self.warnings),
+            "encoding": self.encoding,
+            "model_name": self.metadata_model,
+            "phrases_sent": self.phrase_count,
+            "flushed_count": self.flushed_count,
+            "cleared_count": self.cleared_count,
+            "bytes_received": self.bytes_received,
+            "audio_bytes": stats["bytes"],
+            "audio_rms": stats["rms"],
+            "audio_peak": stats["peak"],
+            "audio_duration_s": stats["duration_s"],
+            "first_audio_latency_s": _delta(self.session_start_at, self.first_audio_at),
+        }
 
     async def end_session(self, force=False):
         """Close the streaming session
@@ -558,11 +606,14 @@ class MultiConnectionTTSClient:
     to system speakers.
     """
 
-    def __init__(self, endpoint_name, region=DEFAULT_REGION, num_connections=1, playback_connection_id=1):
+    def __init__(self, endpoint_name, region=DEFAULT_REGION, num_connections=1,
+                 playback_connection_id=1, collect_audio=False):
         self.endpoint_name = endpoint_name
         self.region = region
         self.num_connections = num_connections
+        # playback_connection_id == 0 means headless (no speaker playback).
         self.playback_connection_id = playback_connection_id
+        self.collect_audio = collect_audio
         self.bidi_endpoint = f"https://runtime.sagemaker.{region}.amazonaws.com:8443"
         self.client = None
         self._boto_session = None
@@ -666,10 +717,17 @@ class MultiConnectionTTSClient:
 
         logger.info(f"Initializing {self.num_connections} connection(s), playback on connection {self.playback_connection_id}...")
 
+        requested_sr = int(kwargs.get("sample_rate", SAMPLE_RATE) or SAMPLE_RATE)
+
         # Create all connections
         for i in range(1, self.num_connections + 1):
             should_playback = (i == self.playback_connection_id)
-            conn = DeepgramSageMakerTTSConnection(i, self.client, self.endpoint_name, should_playback=should_playback, boto_session=self._boto_session)
+            conn = DeepgramSageMakerTTSConnection(
+                i, self.client, self.endpoint_name,
+                should_playback=should_playback, boto_session=self._boto_session,
+                collect_audio=self.collect_audio,
+            )
+            conn._summary_sample_rate = requested_sr
             self.connections.append(conn)
 
         # Start all sessions in parallel
@@ -684,6 +742,12 @@ class MultiConnectionTTSClient:
 
     def _initialize_audio_playback(self):
         """Initialize PyAudio for audio playback"""
+        if pyaudio is None:
+            raise RuntimeError(
+                "pyaudio is not installed but speaker playback was requested. "
+                "Install it (brew install portaudio && uv add pyaudio) or run with "
+                "--no-playback / --playback 0."
+            )
         logger.info("Initializing audio playback device")
 
         self.pyaudio_instance = pyaudio.PyAudio()
@@ -722,18 +786,22 @@ class MultiConnectionTTSClient:
 
         logger.info("Audio playback closed")
 
-    async def stream_text_and_playback_audio(self, duration_seconds, phrases):
+    async def stream_text_and_playback_audio(self, duration_seconds, phrases, max_phrases=None):
         """
         Stream text to all connections and playback audio from the selected connection
 
         Args:
-            duration_seconds: How long to run the test for in seconds
-            phrases: List of text phrases to cycle through and send
+            duration_seconds: How long to run the test for in seconds.
+            phrases: List of text phrases to cycle through and send.
+            max_phrases: If set, send exactly this many phrases (each phrase once
+                when == len(phrases)) then stop — deterministic mode for the e2e
+                drivers. ``None`` cycles phrases for the full duration.
         """
-        if self.playback_connection_id <= self.num_connections:
+        has_playback = 1 <= self.playback_connection_id <= self.num_connections
+        if has_playback:
             self._initialize_audio_playback()
 
-        playback_conn = self.connections[self.playback_connection_id - 1] if self.playback_connection_id <= self.num_connections else None
+        playback_conn = self.connections[self.playback_connection_id - 1] if has_playback else None
 
         start_time = None  # Set when first audio chunk is played
         phrase_index = 0
@@ -766,6 +834,13 @@ class MultiConnectionTTSClient:
                         break
                     if start_time is not None and time.time() - start_time >= duration_seconds:
                         logger.info(f"Duration elapsed ({duration_seconds}s), stopping text generation")
+                        break
+
+                    # Deterministic one-shot mode: stop AFTER draining the previous
+                    # flush (above) — so the final phrase's audio + Flushed ack are
+                    # fully received before teardown — not before sending it.
+                    if max_phrases is not None and phrase_index >= max_phrases:
+                        logger.info(f"Sent {phrase_index} phrase(s) (max_phrases), stopping text generation")
                         break
 
                     active_connections = [conn for conn in self.connections if conn.is_active]
@@ -908,6 +983,44 @@ async def main():
         help="Path to file containing text phrases to synthesize, one per line (default: tts-input.txt)"
     )
     parser.add_argument(
+        "--text",
+        default=None,
+        help="Inline text to synthesize (overrides --text-file; single phrase)."
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Send each phrase exactly once then stop (deterministic), instead of "
+             "cycling phrases for --duration."
+    )
+    parser.add_argument(
+        "--no-playback",
+        action="store_true",
+        help="Run headless — do not play audio to speakers (sets playback to 0). "
+             "Required when pyaudio/PortAudio is unavailable (CI / e2e)."
+    )
+    parser.add_argument(
+        "--extra",
+        default="",
+        metavar="k=v&k2=v2",
+        help="Extra Deepgram /v1/speak query parameters appended verbatim "
+             "(e.g. 'encoding=mulaw&sample_rate=8000&speed=1.2')."
+    )
+    parser.add_argument(
+        "--summary-jsonl",
+        default=None,
+        metavar="PATH",
+        help="Write a per-connection JSON summary (one object per line) with audio "
+             "stats (bytes/RMS/duration) + protocol acks for the e2e drivers."
+    )
+    parser.add_argument(
+        "--save-audio-dir",
+        default=None,
+        metavar="DIR",
+        help="Save each connection's synthesized audio to DIR (WAV for linear16, "
+             "raw bytes otherwise)."
+    )
+    parser.add_argument(
         "--region",
         default="us-east-2",
         help="AWS region (default: us-east-2)"
@@ -921,33 +1034,57 @@ async def main():
 
     args = parser.parse_args()
 
+    # --no-playback forces headless (playback id 0).
+    if args.no_playback:
+        args.playback = 0
+
     # Validate parameters
     if args.connections < 1:
         print("ERROR: --connections must be a positive integer (minimum 1)")
         sys.exit(1)
 
-    if args.playback < 1 or args.playback > args.connections:
-        print(f"ERROR: --playback must be between 1 and {args.connections}")
+    if args.playback != 0 and (args.playback < 1 or args.playback > args.connections):
+        print(f"ERROR: --playback must be 0 (headless) or between 1 and {args.connections}")
         sys.exit(1)
 
     if args.duration < 1:
         print("ERROR: --duration must be a positive integer (minimum 1 second)")
         sys.exit(1)
 
-    # Load text phrases from file
-    try:
-        with open(args.text_file, "r", encoding="utf-8") as f:
-            phrases = [line.strip() for line in f if line.strip()]
-    except FileNotFoundError:
-        print(f"ERROR: Text file not found: {args.text_file}")
-        sys.exit(1)
-    except OSError as e:
-        print(f"ERROR: Could not read text file '{args.text_file}': {e}")
-        sys.exit(1)
+    # Parse --extra query params (k=v&k2=v2).
+    extra_params: dict[str, str] = {}
+    for pair in (args.extra or "").split("&"):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            print(f"ERROR: --extra entry '{pair}' must be in k=v form")
+            sys.exit(1)
+        k, v = pair.split("=", 1)
+        extra_params[k.strip()] = v.strip()
+
+    # Load text: inline --text wins, else the text file.
+    if args.text is not None:
+        phrases = [args.text]
+        text_source = "--text (inline)"
+    else:
+        try:
+            with open(args.text_file, "r", encoding="utf-8") as f:
+                phrases = [line.strip() for line in f if line.strip()]
+        except FileNotFoundError:
+            print(f"ERROR: Text file not found: {args.text_file}")
+            sys.exit(1)
+        except OSError as e:
+            print(f"ERROR: Could not read text file '{args.text_file}': {e}")
+            sys.exit(1)
+        text_source = f"{args.text_file} ({len(phrases)} phrase(s))"
 
     if not phrases:
-        print(f"ERROR: Text file '{args.text_file}' contains no non-empty lines")
+        print(f"ERROR: no non-empty text to synthesize")
         sys.exit(1)
+
+    max_phrases = len(phrases) if args.once else None
+    collect_audio = bool(args.summary_jsonl or args.save_audio_dir)
 
     # Configure logging
     logging.basicConfig(
@@ -956,17 +1093,24 @@ async def main():
         force=True
     )
 
+    requested_sr = int(extra_params.get("sample_rate", SAMPLE_RATE) or SAMPLE_RATE)
+    requested_encoding = extra_params.get("encoding", "linear16")
+
     print("=" * 60)
     print("Deepgram SageMaker Multi-Connection TTS Streaming Client")
     print("=" * 60)
     print(f"Endpoint: {args.endpoint_name}")
     print(f"Connections: {args.connections}")
-    print(f"Playback Connection: {args.playback}")
+    print(f"Playback Connection: {args.playback if args.playback else 'none (headless)'}")
+    print(f"Mode: {'send-once' if args.once else 'cycle for duration'}")
     print(f"Duration: {args.duration} seconds")
     print(f"Voice: {args.voice}")
     print(f"Region: {args.region}")
-    print(f"Text file: {args.text_file} ({len(phrases)} phrase(s))")
-    print(f"Sample Rate: {SAMPLE_RATE} Hz")
+    print(f"Text: {text_source}")
+    print(f"Encoding: {requested_encoding}")
+    print(f"Sample Rate: {requested_sr} Hz")
+    if extra_params:
+        print(f"Extra params: {args.extra}")
     print(f"Channels: {CHANNELS} (Mono)")
     print("=" * 60)
 
@@ -975,7 +1119,8 @@ async def main():
         endpoint_name=args.endpoint_name,
         region=args.region,
         num_connections=args.connections,
-        playback_connection_id=args.playback
+        playback_connection_id=args.playback,
+        collect_audio=collect_audio,
     )
 
     loop = asyncio.get_running_loop()
@@ -1005,18 +1150,19 @@ async def main():
         client.verify_endpoint()
 
         # Initialize all connections with Deepgram parameters
-        await client.initialize_connections(voice=args.voice)
+        await client.initialize_connections(voice=args.voice, **extra_params)
 
         print("\n" + "="*60)
         print(f"🎧 TTS STREAMING - {args.connections} Connection(s)")
-        print(f"   Audio playback: Connection {args.playback}")
+        playback_label = f"Connection {args.playback}" if args.playback else "none (headless)"
+        print(f"   Audio playback: {playback_label}")
         print(f"   Duration: {args.duration} seconds")
         print("   (Press Ctrl+C to stop)")
         print("="*60 + "\n")
 
         # Stream text and playback audio
         streaming_task = asyncio.create_task(
-            client.stream_text_and_playback_audio(args.duration, phrases)
+            client.stream_text_and_playback_audio(args.duration, phrases, max_phrases=max_phrases)
         )
         await streaming_task
 
@@ -1029,6 +1175,28 @@ async def main():
         loop.remove_signal_handler(signal.SIGINT)
         print("\n" + "="*60)
         await client.end_all_sessions(force=shutdown_event.is_set())
+
+        # Persist per-connection audio + summary for the e2e drivers.
+        if args.save_audio_dir:
+            from pathlib import Path as _Path
+            out_dir = _Path(args.save_audio_dir)
+            ext = "wav" if requested_encoding == "linear16" else "bin"
+            for conn in client.connections:
+                try:
+                    conn.save_audio(out_dir / f"conn-{conn.connection_id:03d}.{ext}")
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"[Connection {conn.connection_id}] Could not save audio: {e}")
+        if args.summary_jsonl:
+            try:
+                with open(args.summary_jsonl, "w") as f:
+                    for conn in client.connections:
+                        f.write(json.dumps(conn.summary()) + "\n")
+                print(f"Per-connection summary written: {args.summary_jsonl}")
+            except OSError as e:
+                logger.error(f"Could not write --summary-jsonl {args.summary_jsonl}: {e}")
+
+    if any(c.errored for c in client.connections):
+        exit_code = exit_code or 1
 
     if not shutdown_event.is_set() and exit_code == 0:
         logger.info("✅ TTS streaming complete!")
