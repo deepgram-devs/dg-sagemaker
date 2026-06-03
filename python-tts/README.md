@@ -183,13 +183,9 @@ uv run e2e/e2e_test_streaming.py --list
 | `multi_phrase_flush` | 3 phrases — multiple `Flushed` acks (Speak→Flush→Flushed loop) |
 | `encoding_linear16_24k` | explicit linear16 @ 24 kHz — non-silent audio |
 | `encoding_mulaw_8k` | streaming-supported companded codec (bytes-only check) |
+| `speed_fast` | `speed=1.4` over the websocket — non-silent audio when supported; PASS-WITH-NOTE on bundles that silently drop `speed` (no audio → flush-ack timeout) |
 | `voice_alt` | alternate voice (PASS-WITH-NOTE if unbundled) |
 | `mip_opt_out` | passthrough flag (smoke) |
-
-> `speed` is exercised in the batch driver (clean 400 → PASS-WITH-NOTE on
-> bundles without it). Over the websocket transport an unsupported `speed`
-> degrades to a silent flush timeout, so it is intentionally not a streaming
-> scenario.
 
 Both drivers: exit code 0 = all pass; `tolerated_error_substring` scenarios
 PASS-WITH-NOTE when the endpoint returns a known "not supported by this bundle"

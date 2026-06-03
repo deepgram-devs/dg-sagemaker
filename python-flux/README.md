@@ -334,6 +334,7 @@ uv run e2e/e2e_test_streaming.py --list --model flux-general-multi
 | `feature_eot_timeout_ms` | `--eot-timeout-ms 600` (force EoT on short silence) |
 | `feature_eager_eot` | `--eager-eot-threshold 0.5` — asserts `EagerEndOfTurn` is emitted |
 | `feature_keyterm` | `--keyterms spacewalk,female` — presence check (soft) |
+| `feature_profanity_filter` | `--profanity-filter true` — PASS-WITH-NOTE on bundles that reject `profanity_filter` as an unknown query param |
 | `feature_encoding_linear16` | explicit `--encoding linear16` |
 | `feature_mip_opt_out` | `mip_opt_out=true` (smoke) |
 | `feature_configure_thresholds` | mid-stream `Configure` → asserts `ConfigureSuccess`; PASS-WITH-NOTE on `CloseStream`-only bundles that reject `Configure` |
