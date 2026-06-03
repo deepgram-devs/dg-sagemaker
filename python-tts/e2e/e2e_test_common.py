@@ -43,7 +43,7 @@ REFERENCE_PHRASES = [
 # produce audio (auditory correctness is not asserted — this is a smoke check).
 # See https://developers.deepgram.com/docs/tts-voice-controls
 IPA_TEXT = (
-    'The medication \\{"word":"dupilumab","pronounce":"duːˈpɪljuːmæb"} '
+    'The medication \\{"word":"dupilumab","pronounce":"duːˈpɪljuːmæb"\\} '
     "is administered every two weeks."
 )
 

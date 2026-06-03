@@ -370,10 +370,17 @@ class DeepgramFluxConnection:
             else:
                 message = f"[Connection {self.connection_id}] Error in response processor: {e}"
                 self.is_active = False
+                # Record the failure so it surfaces in summary()/--summary-jsonl —
+                # a stream-level ModelStreamError (e.g. the server rejecting a
+                # query param at connect) does not arrive as a JSON Error frame.
+                self.errored = True
+                self.error_messages.append(str(e))
                 logger.error(message, exc_info=True)
                 if self.fatal_error_handler:
                     self.fatal_error_handler(message)
         except Exception as e:
+            self.errored = True
+            self.error_messages.append(str(e))
             logger.error(
                 f"[Connection {self.connection_id}] Error in response processor: {e}",
                 exc_info=True,

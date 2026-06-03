@@ -125,32 +125,45 @@ has no transcript to score against, so each scenario checks the audio itself
 requested sample rate, and — for speed control — that duration changes with
 `speed`). No second (STT) endpoint is required.
 
-A TTS endpoint serves one of two transports, so there are two drivers (mirroring
-the STT split):
+A TTS endpoint can be invoked three ways. The batch driver covers **REST sync**
+and **async** (`--mode`); the streaming driver covers the **websocket**
+transport — mirroring the STT split.
 
-### `e2e/e2e_test_batch.py` — REST (`invoke_endpoint`)
+### `e2e/e2e_test_batch.py` — REST sync + async (`invoke_endpoint` / `invoke_endpoint_async`)
 
-The bulk of parameter coverage. Calls `invoke_endpoint` synchronously with the
-`/v1/speak` path + query in `CustomAttributes` and a JSON `{"text": "..."}` body,
-then validates the returned audio.
+The bulk of parameter coverage. `--mode sync` (default) calls `invoke_endpoint`
+with the `/v1/speak` path + query in `CustomAttributes` and a JSON
+`{"text": "..."}` body. `--mode async` uploads that JSON to S3, calls
+`invoke_endpoint_async`, and polls the S3 output (audio) / failure prefixes.
+Either way the returned audio is validated self-contained. A given endpoint
+serves one transport — whichever its config was created with (async needs an
+`AsyncInferenceConfig`).
 
 ```bash
 cd python-tts
+# sync endpoint:
 uv run e2e/e2e_test_batch.py your-tts-endpoint --region us-east-2
+
+# async endpoint (config has AsyncInferenceConfig):
+uv run e2e/e2e_test_batch.py your-async-tts-endpoint --mode async \
+  --bucket your-async-bucket --region us-east-2
+
 uv run e2e/e2e_test_batch.py --list
 ```
 
 | Scenario | What it checks |
 |---|---|
-| `basic` / `concurrent_5` | non-empty, non-silent audio; 5-way concurrency |
+| `basic` / `concurrent_5` | linear16/wav non-empty, non-silent audio; 5-way concurrency |
+| `default_format` | records the server's default output format (empirically **mp3** on current bundles) |
 | `voice_aura2_orion` / `voice_aura1_asteria` | alternate Aura-2 / legacy Aura-1 voices (PASS-WITH-NOTE if unbundled) |
 | `encoding_linear16_wav` / `encoding_linear16_raw` | WAV container vs bare PCM (`container=none`) |
-| `encoding_mp3` / `encoding_flac` / `encoding_opus_ogg` / `encoding_mulaw_wav` / `encoding_aac` | each codec's container magic bytes |
+| `encoding_mp3` / `encoding_flac` / `encoding_opus_ogg` / `encoding_mulaw_wav` | each codec's container magic bytes |
+| `encoding_aac` | AAC (raw codec stream — bytes-only check) |
 | `sample_rate_48000` / `sample_rate_16000` | WAV sample rate matches the request |
 | `bit_rate_mp3_32000` | `bit_rate` accepted for mp3 |
-| `speed_duration` | synth at 0.7 / 1.0 / 1.5 — duration must shrink as speed rises (strongest signal) |
-| `pronunciation_ipa` | inline IPA pronunciation override accepted + audio produced |
-| `text_limit_exceeded` | text > 2000 chars → expects HTTP 413 (negative test) |
+| `speed_duration` | synth at 0.7 / 1.0 / 1.5 — duration must shrink as speed rises; PASS-WITH-NOTE if the bundle lacks `speed` |
+| `pronunciation_ipa` | well-formed inline IPA override; PASS-WITH-NOTE if the bundle lacks inline controls |
+| `text_limit_exceeded` | text > 2000 chars → expects rejection (413 / Payload Too Large) |
 | `mip_opt_out` / `tag` | passthrough flags accepted (smoke) |
 
 ### `e2e/e2e_test_streaming.py` — websocket (bidirectional `/v1/speak`)
@@ -170,9 +183,13 @@ uv run e2e/e2e_test_streaming.py --list
 | `multi_phrase_flush` | 3 phrases — multiple `Flushed` acks (Speak→Flush→Flushed loop) |
 | `encoding_linear16_24k` | explicit linear16 @ 24 kHz — non-silent audio |
 | `encoding_mulaw_8k` | streaming-supported companded codec (bytes-only check) |
-| `speed_fast` | `speed=1.4` over the streaming transport (smoke) |
 | `voice_alt` | alternate voice (PASS-WITH-NOTE if unbundled) |
 | `mip_opt_out` | passthrough flag (smoke) |
+
+> `speed` is exercised in the batch driver (clean 400 → PASS-WITH-NOTE on
+> bundles without it). Over the websocket transport an unsupported `speed`
+> degrades to a silent flush timeout, so it is intentionally not a streaming
+> scenario.
 
 Both drivers: exit code 0 = all pass; `tolerated_error_substring` scenarios
 PASS-WITH-NOTE when the endpoint returns a known "not supported by this bundle"

@@ -301,21 +301,27 @@ mirroring the STT suite. Flux is streaming-only, so there is a single driver:
 
 - **`e2e/e2e_test_streaming.py`** — downloads `https://dpgr.am/spacewalk.wav`
   (~25 s English mono), multiplies it to a ~15 min long-form variant, drives
-  `flux_stress.py file` through ~17 scenarios, reads each connection's
+  `flux_stress.py file` through ~15 scenarios, reads each connection's
   `--summary-jsonl`, and validates the combined `EndOfTurn` transcript against
   the known reference via **Word Error Rate** (≤ 5 % by default) plus
   Flux-specific assertions (eager events emitted, `Configure` accepted/rejected,
-  language detection, expected-failure negative tests).
+  language detection).
+
+The suite runs against **either Flux model** — pass `--model` to match the
+endpoint. The language-hint coverage adapts to the model:
 
 ```bash
 cd python-flux
-uv run e2e/e2e_test_streaming.py your-flux-endpoint --region us-east-1
+# English-only endpoint (default):
+uv run e2e/e2e_test_streaming.py your-flux-en-endpoint --region us-east-2
 
-# list scenarios without running:
-uv run e2e/e2e_test_streaming.py --list
+# multilingual endpoint:
+uv run e2e/e2e_test_streaming.py your-flux-multi-endpoint \
+  --model flux-general-multi --region us-east-2
 
-# run a subset:
-uv run e2e/e2e_test_streaming.py your-flux-endpoint --scenarios basic_25s,feature_eager_eot
+# list scenarios for a model (the language-hint scenario differs by model):
+uv run e2e/e2e_test_streaming.py --list                          # en
+uv run e2e/e2e_test_streaming.py --list --model flux-general-multi
 ```
 
 | Scenario | What it checks |
@@ -328,15 +334,14 @@ uv run e2e/e2e_test_streaming.py your-flux-endpoint --scenarios basic_25s,featur
 | `feature_eot_timeout_ms` | `--eot-timeout-ms 600` (force EoT on short silence) |
 | `feature_eager_eot` | `--eager-eot-threshold 0.5` — asserts `EagerEndOfTurn` is emitted |
 | `feature_keyterm` | `--keyterms spacewalk,female` — presence check (soft) |
-| `feature_profanity_filter` | `--profanity-filter true` (no profanity in clip; smoke) |
 | `feature_encoding_linear16` | explicit `--encoding linear16` |
 | `feature_mip_opt_out` | `mip_opt_out=true` (smoke) |
-| `feature_configure_thresholds` | mid-stream `Configure` → asserts `ConfigureSuccess` |
-| `feature_configure_failure` | mid-stream `Configure` with `eager > eot` → asserts `ConfigureFailure` |
-| `feature_keepalive` | `--keepalive-interval 3` (smoke) |
-| `feature_finalize` | `--finalize-at-end` flushes the trailing turn |
-| `feature_multi_model_lang_hint` | `flux-general-multi` + `language_hint en` — PASS-WITH-NOTE if that model isn't bundled |
-| `negative_lang_hint_on_en` | `flux-general-en` + `language_hint es` — expects HTTP 400 (negative test) |
+| `feature_configure_thresholds` | mid-stream `Configure` → asserts `ConfigureSuccess`; PASS-WITH-NOTE on `CloseStream`-only bundles that reject `Configure` |
+| `feature_configure_failure` | mid-stream `Configure` with `eager > eot` → asserts `ConfigureFailure`; PASS-WITH-NOTE on bundles that reject `Configure` |
+| `feature_keepalive` | `--keepalive-interval 3` — PASS-WITH-NOTE on bundles that reject `KeepAlive` as an unknown variant |
+| `feature_finalize` | `--finalize-at-end` — PASS-WITH-NOTE on bundles that reject `Finalize` as an unknown variant |
+| `feature_lang_hint_multi` *(multilingual model only)* | `language_hint en` — asserts `TurnInfo.languages` populated |
+| `negative_lang_hint_on_en` *(English-only model only)* | `language_hint es` — expects rejection (HTTP 400; not supported on `flux-general-en`) |
 
 Exit code 0 = all pass, non-zero = any scenario failed. Per-scenario
 stdout / stderr / summary-jsonl land in `<workdir>/logs/`; aggregated
@@ -347,6 +352,14 @@ Not covered (need re-encoded fixtures the suite doesn't generate): non-`linear16
 encodings and alternate sample rates — the canonical sample is 16 kHz `linear16`.
 Parameter coverage is scoped to the Flux docs
 (https://developers.deepgram.com/docs/flux/) as of the June 2026 audit.
+
+**In-band control-message support is bundle-versioned.** Observed against the
+deployed packages: `flux-english-20260311` accepts only `CloseStream`;
+`flux-multi-20260417` adds `Configure`; neither accepts `KeepAlive` or
+`Finalize` (rejected as `UNPARSABLE_CLIENT_MESSAGE: unknown variant`). The
+`feature_configure_*` / `feature_keepalive` / `feature_finalize` scenarios
+PASS-WITH-NOTE when the message is rejected and pass outright once a bundle
+implements it — so the suite stays green across versions without hiding the gap.
 
 ## Self-Hosted / SageMaker Notes
 

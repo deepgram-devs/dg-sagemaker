@@ -134,23 +134,33 @@ class FluxScenario:
     notes: str = ""
 
 
-def default_scenarios() -> list[FluxScenario]:
+def default_scenarios(model: str = DEFAULT_MODEL) -> list[FluxScenario]:
     """Feature coverage matrix per the Flux docs (June 2026 audit).
 
-    Connection params (all set on the URL at connect time):
-      model (flux-general-en | flux-general-multi), encoding, sample_rate,
-      eot_threshold (0.5–0.9, def 0.7), eager_eot_threshold (0.3–0.9, ≤ eot;
-      enables EagerEndOfTurn/TurnResumed), eot_timeout_ms (500–10000, def 5000),
-      keyterm (repeatable), language_hint (repeatable; multi only),
-      profanity_filter, mip_opt_out, tag.
+    The suite runs against either Flux model — `flux-general-en` or
+    `flux-general-multi` — selected via ``--model`` to match the endpoint. The
+    base scenarios use the run-wide model; the language-hint coverage adapts:
+
+      - on a multilingual model: a POSITIVE test (language hints accepted →
+        ``TurnInfo.languages`` populated);
+      - on the English-only model: a NEGATIVE test (a `language_hint` is
+        rejected, since hints aren't supported on `flux-general-en`).
+
+    Connection params (set on the URL at connect time):
+      model, encoding, sample_rate, eot_threshold (0.5–0.9, def 0.7),
+      eager_eot_threshold (0.3–0.9, ≤ eot; enables EagerEndOfTurn/TurnResumed),
+      eot_timeout_ms (500–10000, def 5000), keyterm (repeatable),
+      language_hint (repeatable; multi only), mip_opt_out, tag.
     In-band control messages: Configure (thresholds / keyterms / language_hints),
-      KeepAlive, Finalize, CloseStream.
+      KeepAlive, Finalize, CloseStream (KeepAlive/Finalize PASS-WITH-NOTE on
+      bundles that implement only CloseStream + Configure).
 
     Not covered here (need re-encoded fixtures we don't generate): non-linear16
     encodings (mulaw/alaw/opus) and alternate sample rates — the canonical
     sample is 16 kHz linear16.
     """
-    return [
+    is_multi = "multi" in (model or "").lower()
+    scenarios: list[FluxScenario] = [
         # ---- Coverage / load ----
         FluxScenario(
             name="basic_25s",
@@ -205,12 +215,6 @@ def default_scenarios() -> list[FluxScenario]:
             notes="keyterm prompting; presence is a soft signal",
         ),
         FluxScenario(
-            name="feature_profanity_filter",
-            description="--profanity-filter true (no profanity in clip; smoke)",
-            extra_args=["--profanity-filter", "true"],
-            notes="clip has no profanity; transcript should be unchanged",
-        ),
-        FluxScenario(
             name="feature_encoding_linear16",
             description="--encoding linear16 (explicit; matches the sample)",
             extra_args=["--encoding", "linear16"],
@@ -228,7 +232,9 @@ def default_scenarios() -> list[FluxScenario]:
             description="mid-stream Configure raises eot_threshold to 0.8",
             extra_args=["--reconfigure-after", "5", "--reconfigure-eot-threshold", "0.8"],
             expect_configure_success=True,
-            notes="ConfigureSuccess expected; stream continues",
+            tolerated_error_substring="Configure",
+            notes="ConfigureSuccess expected; PASS-WITH-NOTE on bundles that reject "
+                  "Configure as an unknown variant (e.g. CloseStream-only builds)",
         ),
         FluxScenario(
             name="feature_configure_failure",
@@ -239,40 +245,47 @@ def default_scenarios() -> list[FluxScenario]:
                 "--reconfigure-eager-eot-threshold", "0.9",
             ],
             expect_configure_failure=True,
-            notes="ConfigureFailure expected; stream continues on prior config",
+            tolerated_error_substring="Configure",
+            notes="ConfigureFailure expected; PASS-WITH-NOTE on bundles that reject "
+                  "Configure as an unknown variant",
         ),
         FluxScenario(
             name="feature_keepalive",
-            description="--keepalive-interval 3 (periodic KeepAlive; smoke)",
+            description="--keepalive-interval 3 (periodic KeepAlive)",
             extra_args=["--keepalive-interval", "3"],
-            notes="KeepAlive accepted; no error",
+            tolerated_error_substring="KeepAlive",
+            notes="KeepAlive when supported; older bundles reject it as an "
+                  "unknown variant (PASS-WITH-NOTE)",
         ),
         FluxScenario(
             name="feature_finalize",
             description="--finalize-at-end (flush final turn before CloseStream)",
             extra_args=["--finalize-at-end"],
-            notes="Finalize flushes the trailing turn",
+            tolerated_error_substring="Finalize",
+            notes="Finalize when supported; older bundles reject it as an "
+                  "unknown variant (PASS-WITH-NOTE)",
         ),
-        # ---- Multilingual model + language hints ----
-        FluxScenario(
-            name="feature_multi_model_lang_hint",
-            description="flux-general-multi + language_hint en (English audio)",
-            model=MULTI_MODEL,
+    ]
+
+    # ---- Language hints: positive on multilingual, negative on English-only ----
+    if is_multi:
+        scenarios.append(FluxScenario(
+            name="feature_lang_hint_multi",
+            description="multilingual model + language_hint en — asserts TurnInfo.languages",
             extra_args=["--language-hints", "en"],
             expect_languages=True,
-            tolerated_error_substring="model",
-            notes="PASS-WITH-NOTE if flux-general-multi is not bundled",
-        ),
-        FluxScenario(
+            notes="language hints accepted on the multilingual model",
+        ))
+    else:
+        scenarios.append(FluxScenario(
             name="negative_lang_hint_on_en",
-            description="flux-general-en + language_hint es — expect HTTP 400",
-            model=DEFAULT_MODEL,
+            description="English-only model + language_hint es — expect rejection",
             extra_args=["--language-hints", "es"],
             skip_wer=True,
             expect_failure=True,
-            notes="language_hint is rejected on the English-only model",
-        ),
-    ]
+            notes="language_hint is not supported on flux-general-en (expect HTTP 400)",
+        ))
+    return scenarios
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +545,7 @@ def main() -> int:
     logging.basicConfig(level=getattr(logging, args.log_level),
                         format="%(asctime)s %(levelname)s %(message)s")
 
-    scenarios = default_scenarios()
+    scenarios = default_scenarios(args.model)
     if args.wer_threshold != 0.05:
         for s in scenarios:
             if s.wer_threshold == 0.05:

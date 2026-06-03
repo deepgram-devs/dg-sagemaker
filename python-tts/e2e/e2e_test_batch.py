@@ -244,9 +244,10 @@ def default_scenarios() -> list[TTSScenario]:
             text=IPA_TEXT,
             params={"encoding": "linear16", "container": "wav"},
             check_rms=True,
-            tolerated_error_substring="bad request",
-            notes="accepts inline IPA + produces audio when supported; older bundles "
-                  "may 400 (PASS-WITH-NOTE), like speed",
+            tolerated_error_substring="inline control",
+            notes="well-formed inline IPA (escaped braces); produces audio on bundles "
+                  "that support inline controls, else MODEL_DOES_NOT_SUPPORT_INLINE_CONTROLS "
+                  "(PASS-WITH-NOTE)",
         ),
         # ---- Limits (negative) ----
         TTSScenario(
