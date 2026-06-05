@@ -2,6 +2,31 @@
 
 Notes for AI agents working in this repo.
 
+## Keep the top-level README in sync
+
+[`README.md`](README.md) at the repo root is the index of every script, grouped
+by service (STT / TTS / Flux) and language (JavaScript / Python / Java). When
+you add, rename, remove, or change the purpose of anything user-facing in a
+subfolder, update that index in the **same change** — do not leave it for later.
+This includes:
+
+- a new script or CLI subcommand (e.g. a new `*_stress.py` mode),
+- a new `e2e/` driver or scenario surface,
+- a new component/language subfolder (add a section and a pointer to its README),
+- a renamed or deleted file that the README links to.
+
+How to keep it consistent:
+
+- Match the existing entry style: a markdown link to the file, then an em-dash
+  one-line description at index altitude. Leave the deep detail (flags,
+  pass/fail, parameter matrices) in the subfolder's own README and link to it.
+- Every path the README links to must exist — verify after editing.
+- Mirror the change in the relevant subfolder README too, and if it's an e2e
+  driver with a non-trivial runtime, add a row to the wall-clock table below.
+
+The same rule applies to this file: when an e2e driver's runtime, pass/fail
+format, or invocation contract changes, update the relevant section here.
+
 ## E2E wall-clock expectations
 
 Pick the right runner. The streaming STT e2e includes a real-time
