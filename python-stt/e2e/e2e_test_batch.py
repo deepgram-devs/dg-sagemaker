@@ -107,6 +107,12 @@ class BatchScenario:
     presence_in_full_response: bool = False  # presence check against whole JSON, not just transcript
     bundle_component: str | None = None
     tolerated_error_substring: str | None = None
+    # Negative scenario: the endpoint MUST reject. PASS iff an invocation fails
+    # with an error containing this substring AND nothing succeeds. Distinct from
+    # `tolerated_error_substring`, which only *tolerates* an error (and would
+    # falsely PASS if the request were silently served). Used to verify the
+    # reject-unknown-params gate (a request with an off-allowlist param → 400).
+    expect_error_substring: str | None = None
     notes: str = ""
 
 
@@ -332,6 +338,23 @@ def _all_scenarios() -> list[BatchScenario]:
             bundle_component="fathom",
             tolerated_error_substring="sentiment",
             notes="English only",
+        ),
+        # ---- Negative: reject-unknown-params gate (shim 400s off-allowlist params) ----
+        BatchScenario(
+            name="sync_25s_reject_unknown_param",
+            description="sync + bogus=true → expect 400 unsupported_parameter (not served)",
+            transport="sync",
+            custom_params={"bogus": "true"},
+            expect_error_substring="unsupported_parameter",
+            notes="reject-unknown-params: off-allowlist key must 400 before stem, not serve",
+        ),
+        BatchScenario(
+            name="sync_25s_reject_unknown_param_falsy",
+            description="sync + bogus=false → expect 400 (reject is value-independent)",
+            transport="sync",
+            custom_params={"bogus": "false"},
+            expect_error_substring="unsupported_parameter",
+            notes="value-independent: a falsy value does NOT exempt an unknown key",
         ),
 
         # ============ Async (InvokeEndpointAsync, S3 in/out) ============
@@ -589,6 +612,31 @@ def run_sync_scenario(
 
     failures = [r for r in results if r[2] is not None]
     successes = [r for r in results if r[2] is None and r[1] is not None]
+
+    # Negative scenario: the endpoint MUST reject (e.g. unsupported param → 400).
+    # PASS iff a failure carrying the expected substring occurred AND nothing was
+    # served (a success means the reject didn't fire). Checked first — for this
+    # scenario type a "failure" is the pass condition.
+    if scenario.expect_error_substring is not None:
+        sub = scenario.expect_error_substring.lower()
+        matched = any(sub in (r[2] or "").lower() for r in failures)
+        ok = matched and not successes
+        if ok:
+            note = f"REJECTED as expected ('{scenario.expect_error_substring}')"
+        elif successes:
+            note = "EXPECTED REJECT but request was served — reject gate not firing"
+        else:
+            first = failures[0][2][:160] if failures else "no response"
+            note = f"EXPECTED '{scenario.expect_error_substring}' but got: {first}"
+        return {
+            "scenario": scenario.name,
+            "ok": ok,
+            "wer": 0.0,
+            "sdi": (0, 0, 0),
+            "words": 0,
+            "elapsed_s": elapsed,
+            "notes": (f"{scenario.notes} | " if scenario.notes else "") + note,
+        }
 
     # PASS-WITH-NOTE: bundle missing component this scenario needs. The
     # endpoint returns a known error pattern we tolerate to surface the

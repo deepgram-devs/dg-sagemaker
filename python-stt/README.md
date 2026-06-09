@@ -550,6 +550,7 @@ uv run e2e/e2e_test_streaming.py your-endpoint --wer-threshold 0.03
 | `feature_keyterms` | `--keyterms 'spacewalk,female'` — presence check on `spacewalk` |
 | `feature_redact_name` | `--redact name` — presence of redaction marker, WER skipped |
 | `adversarial_bare_close` | `--no-use-close-stream` — bare WS close (relaxed WER 10 %) |
+| `reject_unknown_param` | `--extra bogus=true` — negative: PASSES only if the upgrade is rejected (400) and no audio streams; verifies the shim's reject-unknown-params gate |
 
 Exit code 0 = all pass, non-zero = any scenario failed. Per-scenario stdout / stderr / summary-jsonl land in `<workdir>/logs/<scenario>.{stdout,stderr,summary.jsonl}.log` for triage; aggregated `results.json` at `<workdir>/results.json`. Default workdir: `/tmp/dg-sagemaker-e2e/streaming/<timestamp>/`.
 
@@ -580,6 +581,8 @@ uv run e2e/e2e_test_batch.py --mode async --list
 | `sync_25s_diarize` | sync | `diarize=true` — body unchanged |
 | `sync_25s_keyterms` | sync | keyterms biasing, presence check |
 | `sync_25s_redact_name` | sync | `redact=name`, WER skipped |
+| `sync_25s_reject_unknown_param` | sync | negative: `bogus=true` must 400 (`unsupported_parameter`), not serve — reject-unknown-params gate |
+| `sync_25s_reject_unknown_param_falsy` | sync | negative: `bogus=false` must also 400 (reject is value-independent) |
 | `async_25s` | async | Short-form smoke (25 s file via S3) |
 | `async_15min` | async | 15 min audio via S3 in/out |
 | `async_15min_concurrent_4` | async | 4 concurrent async invokes |

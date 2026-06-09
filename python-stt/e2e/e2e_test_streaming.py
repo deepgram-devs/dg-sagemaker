@@ -102,6 +102,12 @@ class StreamScenario:
     expect_failure: bool = False
     bundle_component: str | None = None  # e.g. "streaming-ner"
     tolerated_error_substring: str | None = None  # PASS-WITH-NOTE if seen
+    # Negative scenario: the endpoint MUST reject the upgrade. PASS iff this
+    # substring appears in the client's output AND no transcripts are produced.
+    # Distinct from `tolerated_error_substring` (which only tolerates an error and
+    # would falsely PASS on a served session). Verifies the reject-unknown-params
+    # gate at the WS handshake (off-allowlist param → 400 before the 101).
+    expect_error_substring: str | None = None
     notes: str = ""
 
 
@@ -259,6 +265,23 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
             notes="trailing tail may drop; WER threshold relaxed",
             wer_threshold=0.10,
         ),
+        # ---- Negative: reject-unknown-params gate (shim 400s off-allowlist params) ----
+        StreamScenario(
+            name="reject_unknown_param",
+            description="--extra bogus=true → WS upgrade rejected (not a stream)",
+            connections=1,
+            extra_args=["--extra", "bogus=true"],
+            # SageMaker's bidi-stream does NOT propagate the container's
+            # WS-handshake response body, so the customer sees a generic
+            # "Failed to establish WebSocket connection" (424) rather than the
+            # shim's `unsupported_parameter` JSON (unlike the HTTP /invocations
+            # path, which surfaces it). The reject still fires at the handshake —
+            # confirmed in the shim log ("rejecting request: unsupported query
+            # parameter(s)"). On a healthy endpoint (where the plain scenarios
+            # pass) a 424 for a bogus param can only be this gate.
+            expect_error_substring="Failed to establish WebSocket connection",
+            notes="reject-unknown-params: off-allowlist key must reject the upgrade (generic 424; reason in shim logs)",
+        ),
     ]
 
 
@@ -366,6 +389,44 @@ def run_scenario(
 
     stdout_path.write_text(result.stdout)
     stderr_path.write_text(result.stderr)
+
+    # Negative scenario: the endpoint MUST reject (e.g. unsupported param → 400 at
+    # the WS handshake). PASS iff the expected substring appears in the client's
+    # output AND no finals were produced. Checked BEFORE the summary-exists gate,
+    # because a hard handshake reject may not produce a per-connection summary at
+    # all. NOTE: the exact substring SageMaker surfaces for a container 400 may
+    # differ from the body's "unsupported_parameter" — tune against a real run if
+    # it doesn't match (the gate's intent is "rejected at handshake + no audio").
+    if scenario.expect_error_substring is not None:
+        sub = scenario.expect_error_substring.lower()
+        combined_out = (result.stdout + "\n" + result.stderr).lower()
+        finals_seen = 0
+        if summary_path.exists():
+            try:
+                srows = [json.loads(l) for l in summary_path.read_text().splitlines() if l.strip()]
+                finals_seen = sum(r.get("transcripts_final", 0) for r in srows)
+            except Exception:
+                finals_seen = 0
+        matched = sub in combined_out
+        ok = matched and finals_seen == 0
+        if ok:
+            note = f"REJECTED as expected ('{scenario.expect_error_substring}')"
+        elif finals_seen > 0:
+            note = "EXPECTED REJECT but session produced transcripts — gate not firing"
+        else:
+            note = (f"EXPECTED '{scenario.expect_error_substring}' in client output "
+                    f"but not found (exit={result.returncode}) — inspect stderr_path")
+        return {
+            "scenario": scenario.name,
+            "ok": ok,
+            "wer": 0.0,
+            "sdi": (0, 0, 0),
+            "words": 0,
+            "elapsed_s": elapsed,
+            "notes": (f"{scenario.notes} | " if scenario.notes else "") + note,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+        }
 
     if not summary_path.exists():
         return {
