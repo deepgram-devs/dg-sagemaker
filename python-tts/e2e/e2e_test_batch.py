@@ -60,18 +60,23 @@ from botocore.exceptions import ClientError, NoCredentialsError, PartialCredenti
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from e2e_test_common import (
     IPA_TEXT,
-    REFERENCE_TEXT,
     SILENCE_RMS_FLOOR,
+    SUPPORTED_LANGUAGES,
+    alt_language_voice,
+    default_voice,
+    featured_voices,
     linear16_duration_and_rms,
     parse_wav,
     print_summary_table,
+    reference_text,
     sniff_container,
+    voice_language,
 )
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_REGION = "us-east-2"
-DEFAULT_VOICE = "aura-2-thalia-en"
+DEFAULT_LANGUAGE = "en"
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +116,10 @@ class TTSScenario:
     notes: str = ""
 
 
-def default_scenarios() -> list[TTSScenario]:
-    return [
+def default_scenarios(language: str, voice_coverage_n: int = 3) -> list[TTSScenario]:
+    """Build the per-language scenario set (see streaming module docstring for
+    the multi-voice coverage rationale)."""
+    scenarios: list[TTSScenario] = [
         # ---- Coverage / load ----
         TTSScenario(
             name="basic",
@@ -134,22 +141,6 @@ def default_scenarios() -> list[TTSScenario]:
             concurrency=5,
             requests=5,
             check_rms=True,
-        ),
-        # ---- Voices ----
-        TTSScenario(
-            name="voice_aura2_orion",
-            description="model=aura-2-orion-en (alternate Aura-2 voice)",
-            voice="aura-2-orion-en",
-            check_rms=True,
-            tolerated_error_substring="model",
-            notes="PASS-WITH-NOTE if this voice isn't bundled",
-        ),
-        TTSScenario(
-            name="voice_aura1_asteria",
-            description="model=aura-asteria-en (legacy Aura-1 default voice)",
-            voice="aura-asteria-en",
-            check_rms=True,
-            tolerated_error_substring="model",
         ),
         # ---- Encoding / container matrix ----
         TTSScenario(
@@ -271,6 +262,52 @@ def default_scenarios() -> list[TTSScenario]:
             check_rms=True,
         ),
     ]
+
+    # Per-language multi-voice coverage — one row per featured voice (after the
+    # default voice, which is already exercised by `basic`). Each must produce
+    # non-silent linear16 audio; a single FAIL points at a specific missing or
+    # broken voice in the deployed bundle.
+    voices = featured_voices(language, voice_coverage_n)
+    default = default_voice(language)
+    for v in voices:
+        if v.model == default:
+            continue
+        scenarios.append(TTSScenario(
+            name=f"voice_{v.model}",
+            description=f"voice={v.model} ({v.accent} {v.gender}) — bundle must serve this {v.language} voice",
+            voice=v.model,
+            params={"encoding": "linear16", "container": "wav"},
+            expect_container="wav",
+            check_rms=True,
+            notes=f"language-coverage probe for {v.language}",
+        ))
+
+    # Cross-language negative — confirms the bundle is monolingual.
+    alt = alt_language_voice(language)
+    if alt is not None:
+        scenarios.append(TTSScenario(
+            name="voice_wrong_language",
+            description=f"voice={alt.model} ({alt.language}) — expected to error on a {language}-only bundle",
+            voice=alt.model,
+            params={"encoding": "linear16", "container": "wav"},
+            tolerated_error_substring="model",
+            notes=f"monolingual-bundle negative; PASS-WITH-NOTE on '{alt.language}' voice rejection",
+        ))
+
+    # Aura-1 legacy voice check is only meaningful for English bundles (Aura-1
+    # is English-only). Other languages skip it.
+    if language == "en":
+        scenarios.append(TTSScenario(
+            name="voice_aura1_asteria",
+            description="model=aura-asteria-en (legacy Aura-1 default voice)",
+            voice="aura-asteria-en",
+            params={"encoding": "linear16", "container": "wav"},
+            check_rms=True,
+            tolerated_error_substring="model",
+            notes="PASS-WITH-NOTE if Aura-1 isn't bundled with this Aura-2 deploy",
+        ))
+
+    return scenarios
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +628,18 @@ def _make_parser() -> argparse.ArgumentParser:
     p.add_argument("--upload-prefix", default="tts-e2e-async-input",
                    help="S3 key prefix for async input uploads (default: tts-e2e-async-input)")
     p.add_argument("--region", default=DEFAULT_REGION, help=f"AWS region (default: {DEFAULT_REGION})")
-    p.add_argument("--voice", default=DEFAULT_VOICE, help=f"Default TTS voice (default: {DEFAULT_VOICE})")
+    p.add_argument("--language", default=None,
+                   help=f"Bundle language (one of: {', '.join(SUPPORTED_LANGUAGES)}). "
+                        "Selects the reference text + featured voices. If omitted, "
+                        "derived from the --voice suffix (e.g. -es), else falls back "
+                        f"to '{DEFAULT_LANGUAGE}'.")
+    p.add_argument("--voice", default=None,
+                   help="Default TTS voice. If omitted, the first featured voice for "
+                        "the selected language is used (e.g. aura-2-thalia-en for en, "
+                        "aura-2-celeste-es for es).")
+    p.add_argument("--voice-coverage-n", type=int, default=3,
+                   help="How many language-matched voices to cover individually "
+                        "(default: 3). Each gets its own scenario row.")
     p.add_argument("--workdir", default=None, metavar="DIR",
                    help="Log directory (default: /tmp/dg-sagemaker-e2e/tts-batch/<ts>)")
     p.add_argument("--scenarios", default="", metavar="NAME,NAME,...",
@@ -608,17 +656,40 @@ def _make_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _resolve_language_and_voice(args) -> tuple[str, str]:
+    """Pick the final (language, voice) pair from the CLI args.
+
+    Precedence: --language explicit > derive from --voice suffix > DEFAULT_LANGUAGE.
+    """
+    if args.language:
+        if args.language not in SUPPORTED_LANGUAGES:
+            raise SystemExit(
+                f"ERROR: --language {args.language!r} not supported "
+                f"(known: {', '.join(SUPPORTED_LANGUAGES)})"
+            )
+        language = args.language
+    elif args.voice:
+        lang_from_voice = voice_language(args.voice)
+        language = lang_from_voice or DEFAULT_LANGUAGE
+    else:
+        language = DEFAULT_LANGUAGE
+    voice = args.voice or default_voice(language)
+    return language, voice
+
+
 def main() -> int:
     args = _make_parser().parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level),
                         format="%(asctime)s %(levelname)s %(message)s")
 
-    scenarios = default_scenarios()
-
     if args.list:
-        print("Available scenarios:")
+        # For --list, use the default language so the output is deterministic
+        # without requiring an endpoint or language flag.
+        scenarios = default_scenarios(DEFAULT_LANGUAGE, args.voice_coverage_n)
+        print(f"Available scenarios (shown for language={DEFAULT_LANGUAGE!r}; "
+              f"voice rows are per-language):")
         for s in scenarios:
-            print(f"  {s.name:<24} {s.description}")
+            print(f"  {s.name:<32} {s.description}")
         return 0
 
     if not args.endpoint_name:
@@ -628,6 +699,9 @@ def main() -> int:
     if args.mode == "async" and not args.bucket:
         print("ERROR: --bucket is required with --mode async (S3 input destination).", file=sys.stderr)
         return 1
+
+    language, voice = _resolve_language_and_voice(args)
+    scenarios = default_scenarios(language, args.voice_coverage_n)
 
     if args.scenarios:
         wanted = {tok.strip() for tok in args.scenarios.split(",") if tok.strip()}
@@ -671,7 +745,8 @@ def main() -> int:
     print(f"Endpoint:    {args.endpoint_name}")
     print(f"Mode:        {args.mode}")
     print(f"Region:      {args.region}")
-    print(f"Voice:       {args.voice}")
+    print(f"Language:    {language}")
+    print(f"Voice:       {voice}")
     if args.mode == "async":
         print(f"Bucket:      {args.bucket}")
     print(f"Workdir:     {workdir}")
@@ -686,8 +761,8 @@ def main() -> int:
             session=session,
             region=args.region,
             endpoint=args.endpoint_name,
-            voice=args.voice,
-            text_default=REFERENCE_TEXT,
+            voice=voice,
+            text_default=reference_text(language),
             mode=args.mode,
             async_ctx=async_ctx,
         )

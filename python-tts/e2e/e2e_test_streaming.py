@@ -48,16 +48,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from e2e_test_common import (
-    REFERENCE_PHRASES,
-    REFERENCE_TEXT,
     SILENCE_RMS_FLOOR,
+    SUPPORTED_LANGUAGES,
+    alt_language_voice,
+    default_voice,
+    featured_voices,
     print_summary_table,
+    reference_phrases,
+    reference_text,
+    voice_language,
 )
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_REGION = "us-east-2"
-DEFAULT_VOICE = "aura-2-thalia-en"
+DEFAULT_LANGUAGE = "en"
 
 
 # ---------------------------------------------------------------------------
@@ -86,8 +91,15 @@ class TTSStreamScenario:
     notes: str = ""
 
 
-def default_scenarios() -> list[TTSStreamScenario]:
-    return [
+def default_scenarios(language: str, voice_coverage_n: int = 3) -> list[TTSStreamScenario]:
+    """Build the per-language scenario set.
+
+    ``voice_coverage_n`` controls how many language-matched voices get an
+    individual coverage row (each must PASS on a healthy bundle). Add a
+    cross-language negative test only when an alternative-language voice exists
+    in the catalog — confirms the bundle is monolingual.
+    """
+    scenarios: list[TTSStreamScenario] = [
         TTSStreamScenario(
             name="basic",
             description="1 conn, send once, default linear16 — non-silent audio + Flushed",
@@ -127,17 +139,44 @@ def default_scenarios() -> list[TTSStreamScenario]:
                   "silently drop it (no audio → flush-ack timeout) → PASS-WITH-NOTE",
         ),
         TTSStreamScenario(
-            name="voice_alt",
-            description="voice=aura-2-orion-en (alternate Aura-2 voice)",
-            voice="aura-2-orion-en",
-            tolerated_error_substring="model",
-        ),
-        TTSStreamScenario(
             name="mip_opt_out",
             description="mip_opt_out=true (smoke)",
             extra={"mip_opt_out": "true"},
         ),
     ]
+
+    # Per-language multi-voice coverage. Each featured voice (after the first,
+    # which is exercised as the default in `basic`) gets its own row — synthesizes
+    # the language's reference text and must produce non-silent audio. A failure
+    # on any single voice points at a missing/broken voice in the bundle.
+    voices = featured_voices(language, voice_coverage_n)
+    default = default_voice(language)
+    for v in voices:
+        if v.model == default:
+            continue  # already exercised by `basic`
+        scenarios.append(TTSStreamScenario(
+            name=f"voice_{v.model}",
+            description=f"voice={v.model} ({v.accent} {v.gender}) — bundle must serve this {v.language} voice",
+            voice=v.model,
+            notes=f"language-coverage probe for {v.language}",
+        ))
+
+    # Cross-language negative — confirms the bundle is monolingual. On streaming,
+    # a stem rejection for the wrong-language voice surfaces as no audio + the
+    # Flushed-ack 30s timeout (the actual MODEL_DOES_NOT_SUPPORT error rides a
+    # ModelStreamError frame that the tts_stress per-conn summary records as
+    # "Flushed-ack timeout"). Treat that signature as the tolerated error.
+    alt = alt_language_voice(language)
+    if alt is not None:
+        scenarios.append(TTSStreamScenario(
+            name="voice_wrong_language",
+            description=f"voice={alt.model} ({alt.language}) — expected to error on a {language}-only bundle",
+            voice=alt.model,
+            tolerated_error_substring="Flushed-ack timeout",
+            notes=f"monolingual-bundle negative; PASS-WITH-NOTE on '{alt.language}' voice rejection (manifests as no-audio + flush timeout)",
+        ))
+
+    return scenarios
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +192,7 @@ def _stress_cmd(
     summary_path: Path,
     text_file: Path,
     extra: dict[str, str],
+    skip_verify: bool = False,
 ) -> list[str]:
     cmd = [
         "uv", "run", "--project", str(script.parent),
@@ -167,6 +207,8 @@ def _stress_cmd(
         "--duration", "120",  # generous safety cap; --once stops first
         "--log-level", "WARNING",
     ]
+    if skip_verify:
+        cmd.append("--skip-verify")
     if extra:
         cmd += ["--extra", "&".join(f"{k}={v}" for k, v in extra.items())]
     return cmd
@@ -183,6 +225,7 @@ def run_scenario(
     multi_text_file: Path,
     log_dir: Path,
     subprocess_timeout_s: int,
+    skip_verify: bool = False,
 ) -> dict:
     eff_voice = scenario.voice or voice
     text_file = multi_text_file if scenario.multi_phrase else single_text_file
@@ -193,6 +236,7 @@ def run_scenario(
     cmd = _stress_cmd(
         stress_script, endpoint, region, eff_voice,
         scenario.connections, summary_path, text_file, scenario.extra,
+        skip_verify=skip_verify,
     )
     logger.info(f"[{scenario.name}] running: {' '.join(cmd)}")
 
@@ -307,7 +351,18 @@ def _make_parser() -> argparse.ArgumentParser:
     p.add_argument("endpoint_name", nargs="?", default=None,
                    help="Streaming TTS SageMaker endpoint name (required unless --list)")
     p.add_argument("--region", default=DEFAULT_REGION, help=f"AWS region (default: {DEFAULT_REGION})")
-    p.add_argument("--voice", default=DEFAULT_VOICE, help=f"Default TTS voice (default: {DEFAULT_VOICE})")
+    p.add_argument("--language", default=None,
+                   help=f"Bundle language (one of: {', '.join(SUPPORTED_LANGUAGES)}). "
+                        "Selects the reference text + featured voices. If omitted, "
+                        "derived from the --voice suffix (e.g. -es), else falls back "
+                        f"to '{DEFAULT_LANGUAGE}'.")
+    p.add_argument("--voice", default=None,
+                   help="Default TTS voice. If omitted, the first featured voice for "
+                        "the selected language is used (e.g. aura-2-thalia-en for en, "
+                        "aura-2-celeste-es for es).")
+    p.add_argument("--voice-coverage-n", type=int, default=3,
+                   help="How many language-matched voices to cover individually "
+                        "(default: 3). Each gets its own scenario row.")
     p.add_argument("--workdir", default=None, metavar="DIR",
                    help="Fixture + log directory (default: /tmp/dg-sagemaker-e2e/tts-streaming/<ts>)")
     p.add_argument("--scenarios", default="", metavar="NAME,NAME,...",
@@ -315,9 +370,38 @@ def _make_parser() -> argparse.ArgumentParser:
     p.add_argument("--list", action="store_true", help="List scenarios and exit")
     p.add_argument("--subprocess-timeout-s", type=int, default=120,
                    help="Per-scenario subprocess timeout (default: 120)")
+    p.add_argument("--skip-verify", action="store_true",
+                   help="Skip the tts_stress.py DescribeEndpoint != InService pre-check "
+                        "(passes --skip-verify through to each subprocess). Use during "
+                        "an UpdateEndpoint rollout when the old variant is still serving "
+                        "traffic.")
     p.add_argument("--log-level", default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     return p
+
+
+def _resolve_language_and_voice(args) -> tuple[str, str]:
+    """Pick the final (language, voice) pair from the CLI args.
+
+    Precedence:
+      --language explicit → wins.
+      --voice explicit + no --language → derive language from the voice suffix.
+      neither → default to ``DEFAULT_LANGUAGE`` + its first featured voice.
+    """
+    if args.language:
+        if args.language not in SUPPORTED_LANGUAGES:
+            raise SystemExit(
+                f"ERROR: --language {args.language!r} not supported "
+                f"(known: {', '.join(SUPPORTED_LANGUAGES)})"
+            )
+        language = args.language
+    elif args.voice:
+        lang_from_voice = voice_language(args.voice)
+        language = lang_from_voice or DEFAULT_LANGUAGE
+    else:
+        language = DEFAULT_LANGUAGE
+    voice = args.voice or default_voice(language)
+    return language, voice
 
 
 def main() -> int:
@@ -325,17 +409,22 @@ def main() -> int:
     logging.basicConfig(level=getattr(logging, args.log_level),
                         format="%(asctime)s %(levelname)s %(message)s")
 
-    scenarios = default_scenarios()
-
     if args.list:
-        print("Available scenarios:")
+        # For --list, use the default language so the output is deterministic
+        # without requiring an endpoint or language flag.
+        scenarios = default_scenarios(DEFAULT_LANGUAGE, args.voice_coverage_n)
+        print(f"Available scenarios (shown for language={DEFAULT_LANGUAGE!r}; "
+              f"voice rows are per-language):")
         for s in scenarios:
-            print(f"  {s.name:<24} {s.description}")
+            print(f"  {s.name:<32} {s.description}")
         return 0
 
     if not args.endpoint_name:
         print("ERROR: endpoint_name is required (run with --list to see scenarios).", file=sys.stderr)
         return 1
+
+    language, voice = _resolve_language_and_voice(args)
+    scenarios = default_scenarios(language, args.voice_coverage_n)
 
     if args.scenarios:
         wanted = {tok.strip() for tok in args.scenarios.split(",") if tok.strip()}
@@ -354,11 +443,11 @@ def main() -> int:
     log_dir = workdir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write text fixtures.
+    # Write text fixtures in the target language.
     single_text_file = workdir / "tts-single.txt"
-    single_text_file.write_text(REFERENCE_TEXT + "\n")
+    single_text_file.write_text(reference_text(language) + "\n")
     multi_text_file = workdir / "tts-phrases.txt"
-    multi_text_file.write_text("\n".join(REFERENCE_PHRASES) + "\n")
+    multi_text_file.write_text("\n".join(reference_phrases(language)) + "\n")
 
     stress_script = Path(__file__).resolve().parent.parent / "tts_stress.py"
     if not stress_script.is_file():
@@ -368,7 +457,8 @@ def main() -> int:
     print("=" * 80)
     print(f"Endpoint:    {args.endpoint_name}")
     print(f"Region:      {args.region}")
-    print(f"Voice:       {args.voice}")
+    print(f"Language:    {language}")
+    print(f"Voice:       {voice}")
     print(f"Workdir:     {workdir}")
     print("=" * 80)
     print()
@@ -380,12 +470,13 @@ def main() -> int:
             scenario,
             endpoint=args.endpoint_name,
             region=args.region,
-            voice=args.voice,
+            voice=voice,
             stress_script=stress_script,
             single_text_file=single_text_file,
             multi_text_file=multi_text_file,
             log_dir=log_dir,
             subprocess_timeout_s=args.subprocess_timeout_s,
+            skip_verify=args.skip_verify,
         )
         rows.append(row)
         flag = "PASS" if row["ok"] else "FAIL"

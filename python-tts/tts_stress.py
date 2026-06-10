@@ -1036,6 +1036,14 @@ async def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Set logging level (default: INFO)"
     )
+    parser.add_argument(
+        "--skip-verify",
+        action="store_true",
+        help="Skip the DescribeEndpoint != InService pre-flight check. Use this "
+             "when the endpoint is in Updating status but the old variant is still "
+             "serving traffic (SageMaker blue/green); the WS connect will fail "
+             "fast on its own if the endpoint truly isn't reachable."
+    )
 
     args = parser.parse_args()
 
@@ -1150,9 +1158,14 @@ async def main():
 
     exit_code = 0
     try:
-        # Verify the endpoint exists and is ready before opening connections
+        # Verify the endpoint exists and is ready before opening connections.
+        # `--skip-verify` bypasses the status gate so callers can drive the
+        # endpoint during an UpdateEndpoint rollout (old variant still serving).
         client._initialize_client()
-        client.verify_endpoint()
+        if not args.skip_verify:
+            client.verify_endpoint()
+        else:
+            logger.info(f"Skipping endpoint verification (--skip-verify) for '{args.endpoint_name}'")
 
         # Initialize all connections with Deepgram parameters
         await client.initialize_connections(voice=args.voice, **extra_params)
