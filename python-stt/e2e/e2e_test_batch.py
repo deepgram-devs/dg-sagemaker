@@ -181,8 +181,13 @@ def _all_scenarios() -> list[BatchScenario]:
             name="sync_25s_diarize_v2",
             description="sync + diarize_model=v2 (pre-recorded only)",
             transport="sync",
-            custom_params={"diarize": "true", "diarize_model": "v2"},
-            notes="diarize_model=v2 is pre-recorded only; streaming returns 400",
+            custom_params={"diarize_model": "v2"},
+            notes=(
+                "diarize_model=v2 is pre-recorded only; streaming returns 400. "
+                "Must be sent WITHOUT diarize=true — stem main (2026-06, post "
+                "1.192) rejects the combo with 400 'diarize_model cannot be "
+                "used together with diarize or diarize_version'."
+            ),
         ),
         BatchScenario(
             name="sync_25s_smart_format",
