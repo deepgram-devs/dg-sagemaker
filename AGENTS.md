@@ -60,6 +60,21 @@ uv run e2e/e2e_test_streaming.py <endpoint-name>
 `uv sync` is not required up front — `uv run` resolves the project venv on
 first call.
 
+### Multilingual endpoints take `--language multi`, not a specific code
+
+A multilingual STT listing (e.g. the **Nova-3 Multilingual STT Streaming**
+marketplace product) loads ONE model registered under `language=multi`, not a
+per-language model. Invoke it with `--language multi` — impeller then runs
+language detection across the bundled languages. Passing a specific
+`--language en` (which is the **default**) resolves to `model=general
+language=en tier=nova-3`, which a multilingual bundle has no match for: impeller
+logs `Could not find a model that matched … language=en`, stem returns 400, and
+**every** WS connection closes in ~1 s with `finals=0` / WER 100 %. That looks
+like a dead endpoint but is just the wrong param — re-run with `--language
+multi` before concluding the listing is broken. (Monolingual listings use the
+specific code; Flux multilingual is selected by model name
+`--model flux-general-multi`, not a language param.)
+
 ## Pass/fail parsing
 
 The final block is always:
@@ -71,6 +86,14 @@ PASSED: N  FAILED: N  TOTAL: N
 
 Grep for `^PASSED:` to get the counts; nothing else in the output uses that
 prefix. The scenario table immediately above is the per-scenario record.
+
+**Judge by the `^PASSED:` line, NEVER by the process exit code.** The runner does
+exit non-zero on failure, but if you wrap the run with a trailing command — e.g.
+`… 2>&1; echo "EXIT=$?"` — the *wrapper's* (echo's) exit code is what a detached
+background process / task notification reports, masking a real failure as
+"exit 0". A run can show `PASSED: 0  FAILED: 16` yet notify "exit code 0". If you
+must log the code, capture and re-raise it (`rc=$?; echo "EXIT=$rc"; exit $rc`);
+otherwise drop the trailing echo and read the tail for `^PASSED:` / `FAILED:`.
 
 ## Endpoint deletion ordering
 
