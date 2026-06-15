@@ -145,9 +145,10 @@ class DeepgramSageMakerConnection:
         self.last_recv_at: float | None = None
         self.close_observed_at: float | None = None
         self.close_reason: str | None = None
-        # Guards against closing (and CloseStream-ing) the input stream more
+        # Guards against closing the input stream / sending CloseStream more
         # than once across the EOF, error, and end_session paths.
         self._input_closed = False
+        self._close_stream_sent = False
 
     async def start_session(self, sample_rate, model="nova-3", language="en", **kwargs):
         """
@@ -236,37 +237,53 @@ class DeepgramSageMakerConnection:
             # InvalidStateError when cancelled while a body callback is in flight.
             # No CloseStream here: the stream has already errored, so a bare
             # close is the only meaningful action.
-            await self._close_input_stream(send_close_stream=False)
+            await self._close_input_stream()
 
-    async def _close_input_stream(self, send_close_stream: bool, timeout: float = 5.0):
-        """Close the input stream once, optionally preceding it with a Deepgram
-        CloseStream frame.
+    async def _send_close_stream(self, timeout: float = 5.0):
+        """Send a single Deepgram ``{"type":"CloseStream"}`` frame to signal
+        end-of-audio and ask the server to finalize
+        (https://developers.deepgram.com/docs/close-stream).
 
-        When ``send_close_stream`` is true and this connection has CloseStream
-        enabled, a single ``{"type":"CloseStream"}`` text frame is sent before
-        the WebSocket Close so the server flushes the final transcript tail
-        (https://developers.deepgram.com/docs/close-stream). Without it, stem
-        does not flush a trailing transcript on a bare WS Close when
-        ``endpointing=false``.
+        Deliberately does NOT close the input (request) stream. Over the
+        SageMaker bidirectional transport, closing the input stream is rendered
+        to the container as a WebSocket Close, and doing that immediately after
+        CloseStream races the server's CloseStream-triggered finalize — the
+        server flushes the trailing segment and then closes the response stream,
+        but a near-simultaneous Close makes stem break before that final result
+        is delivered, dropping the tail. The well-behaved sequence
+        is: send CloseStream, drain the response stream until the server closes
+        it, THEN close the input stream as cleanup (see ``end_session``).
+
+        Idempotent and a no-op when this connection has CloseStream disabled
+        (``--no-use-close-stream``) or the input stream is already closed.
+        """
+        if not self.use_close_stream or self._close_stream_sent or self._input_closed:
+            return
+        self._close_stream_sent = True
+        try:
+            close_msg = json.dumps({"type": "CloseStream"}).encode("utf-8")
+            payload = RequestPayloadPart(bytes_=close_msg)
+            event = RequestStreamEventPayloadPart(value=payload)
+            await asyncio.wait_for(self.stream.input_stream.send(event), timeout=timeout)
+        except Exception as e:
+            logger.warning(
+                f"[Connection {self.connection_id}] Could not send CloseStream: {e}"
+            )
+
+    async def _close_input_stream(self, timeout: float = 5.0):
+        """Close the input (request) stream once.
+
+        On the CloseStream path, call this only AFTER draining the response
+        stream (see ``_send_close_stream`` for why). On the error / bare-close
+        path (``--no-use-close-stream``), the input-stream close is itself the
+        only end-of-audio signal, so it is called directly.
 
         Idempotent: the EOF, error, and end_session paths may all reach here,
-        but the CloseStream frame and the close are issued at most once.
+        but the close is issued at most once.
         """
         if self._input_closed:
             return
         self._input_closed = True
-
-        if send_close_stream and self.use_close_stream:
-            try:
-                close_msg = json.dumps({"type": "CloseStream"}).encode("utf-8")
-                payload = RequestPayloadPart(bytes_=close_msg)
-                event = RequestStreamEventPayloadPart(value=payload)
-                await asyncio.wait_for(self.stream.input_stream.send(event), timeout=timeout)
-            except Exception as e:
-                logger.warning(
-                    f"[Connection {self.connection_id}] Could not send CloseStream: {e}"
-                )
-
         try:
             await asyncio.wait_for(self.stream.input_stream.close(), timeout=timeout)
         except asyncio.TimeoutError:
@@ -400,34 +417,59 @@ class DeepgramSageMakerConnection:
             ],
         }
 
+    async def _drain_responses(self, timeout: float = 10.0):
+        """Wait for the response processor to read the server's final results
+        and observe the server's clean close (receive() -> None). On timeout,
+        force the input stream closed to unblock the server, then cancel.
+
+        Uses asyncio.wait (not wait_for) so the task isn't cancelled mid-await —
+        awscrt raises InvalidStateError if a future is cancelled while its
+        C-level body callback is in flight.
+        """
+        if not (self.response_task and not self.response_task.done()):
+            return
+        done, _ = await asyncio.wait({self.response_task}, timeout=timeout)
+        if not done:
+            logger.warning(
+                f"[Connection {self.connection_id}] Timeout waiting for final responses; "
+                "forcing task shutdown"
+            )
+            self.is_active = False
+            await self._close_input_stream()
+            self.response_task.cancel()
+            try:
+                await self.response_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
     async def end_session(self):
-        """Close the streaming session."""
+        """Close the streaming session.
+
+        Well-behaved close ordering: send CloseStream, drain the
+        response stream until the server finalizes the trailing segment and
+        closes the stream on its own, and ONLY THEN close our input stream.
+        Closing the input stream is rendered to the SageMaker container as a
+        WebSocket Close; doing it immediately after CloseStream races the
+        server's finalize and drops the trailing transcript. `is_active` is held
+        True across the drain so `_process_responses` keeps reading finals until
+        the server's clean close — streaming is already complete by the time
+        end_session runs, so no further audio is sent meanwhile.
+        """
         logger.debug(f"[Connection {self.connection_id}] Ending session")
-        self.is_active = False
 
-        # Close the input stream, sending CloseStream first when enabled so the
-        # server flushes the final transcript (https://developers.deepgram.com/docs/close-stream).
-        # Usually a no-op here because the EOF path already closed the stream;
-        # this covers connections that never reached EOF (e.g. --duration cutoff).
-        await self._close_input_stream(send_close_stream=True)
-
-        if self.response_task and not self.response_task.done():
-            # Prefer asyncio.wait over wait_for to avoid cancelling the task
-            # during the wait — awscrt raises InvalidStateError when a future
-            # is cancelled while its C-level body callback is in flight.
-            done, _ = await asyncio.wait({self.response_task}, timeout=10.0)
-            if not done:
-                logger.warning(
-                    f"[Connection {self.connection_id}] Timeout waiting for final responses; "
-                    "forcing task shutdown"
-                )
-                # Cancelling after timeout is unavoidable to prevent the process
-                # from hanging. awscrt may log an InvalidStateError internally.
-                self.response_task.cancel()
-                try:
-                    await self.response_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+        if self.use_close_stream:
+            # Idempotent: the EOF path normally already sent CloseStream; this
+            # also covers connections that never reached EOF (--duration cutoff).
+            await self._send_close_stream()
+            await self._drain_responses(timeout=10.0)
+            self.is_active = False
+            await self._close_input_stream()
+        else:
+            # Bare-close mode (--no-use-close-stream): the input-stream close is
+            # the only end-of-audio signal, so close first, then drain.
+            self.is_active = False
+            await self._close_input_stream()
+            await self._drain_responses(timeout=10.0)
 
         logger.info(
             f"[Connection {self.connection_id}] Session ended "
@@ -763,11 +805,18 @@ class MultiConnectionWAVClient:
         # Signal EOF so the server sends final results.  Without this, idle
         # connections (especially early batches) wait indefinitely for more
         # audio and may be timed out by the server.  When CloseStream is
-        # enabled this sends {"type":"CloseStream"} before the WS Close so the
-        # trailing transcript is flushed; with --loop this fires once per
-        # session (after the loop fully exits), not on every wrap.
+        # enabled we send {"type":"CloseStream"} but DO NOT close the input
+        # stream here — closing it (a WS Close to the container) immediately
+        # after CloseStream races the server's finalize and drops the trailing
+        # transcript. end_session drains the responses, then closes
+        # the input stream. With --no-use-close-stream the bare input-close is
+        # the only EOF signal, so do that directly. With --loop this fires once
+        # per session (after the loop fully exits), not on every wrap.
         if conn.is_active and conn.stream:
-            await conn._close_input_stream(send_close_stream=True)
+            if conn.use_close_stream:
+                await conn._send_close_stream()
+            else:
+                await conn._close_input_stream()
 
     def _safe_print(self, text: str):
         """Print a line of text atomically to stdout.

@@ -96,6 +96,51 @@ def expected_text_for_loops(loops: int, *, sep: str = " ") -> str:
     return sep.join([SPACEWALK_REFERENCE_TEXT] * loops)
 
 
+def trim_trailing_silence(
+    src: Path, dst: Path, *, threshold_frac: float = 0.015, min_keep_s: float = 1.0
+) -> float:
+    """Write `dst` = `src` with trailing (near-)silence removed, so the clip ends
+    right at the last speech sample. Returns the trimmed duration in seconds.
+
+    This recreates the "pre-segmented telephony, little/no trailing silence"
+    condition: with endpointing enabled, the final segment never
+    sees the trailing silence that would endpoint it in-stream, so it is emitted
+    ONLY if the server's CloseStream-triggered finalize is delivered. A clip with
+    trailing silence (like raw spacewalk.wav) endpoints its last segment normally
+    and therefore can't catch a tail-finalize regression. Speech content is
+    untouched, so the reference transcript is unchanged.
+    """
+    import array
+
+    with wave.open(str(src), "rb") as wf:
+        sw, sr, ch = wf.getsampwidth(), wf.getframerate(), wf.getnchannels()
+        if sw != 2:
+            raise ValueError(f"{src} must be 16-bit PCM")
+        samples = array.array("h")
+        samples.frombytes(wf.readframes(wf.getnframes()))
+
+    total_frames = len(samples) // ch
+    peak = max((abs(s) for s in samples), default=1) or 1
+    thr = peak * threshold_frac
+    # Scan backward for the last frame whose loudest channel exceeds threshold.
+    last_voiced = 0
+    for f in range(total_frames - 1, -1, -1):
+        base = f * ch
+        if max(abs(samples[base + c]) for c in range(ch)) > thr:
+            last_voiced = f
+            break
+    end_frame = max(last_voiced + 1, int(min_keep_s * sr))
+    end_frame = min(end_frame, total_frames)
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(dst), "wb") as wf:
+        wf.setnchannels(ch)
+        wf.setsampwidth(sw)
+        wf.setframerate(sr)
+        wf.writeframes(samples[: end_frame * ch].tobytes())
+    return end_frame / sr
+
+
 # ---------------------------------------------------------------------------
 # WER
 # ---------------------------------------------------------------------------

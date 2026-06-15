@@ -68,6 +68,7 @@ from e2e_test_common import (
     fmt_wer,
     multiply_wav,
     print_summary_table,
+    trim_trailing_silence,
     validate_pcm16,
     wer,
 )
@@ -95,10 +96,19 @@ class StreamScenario:
     name: str
     description: str
     use_long_form: bool = False
+    # Use the trailing-silence-trimmed clip (ends at the last speech sample) so
+    # the final segment isn't endpointed in-stream and is delivered ONLY if the
+    # server's CloseStream finalize reaches the client.
+    use_notail: bool = False
     connections: int = 1
     extra_args: list[str] = field(default_factory=list)
     wer_threshold: float = 0.05
     presence_check: str | None = None  # substring or marker that must appear
+    # Substring that must appear in the combined final text, used as a TAIL
+    # guard: set it to the reference's last word(s) on a no-trailing-silence clip
+    # so a dropped final segment (tail truncation) fails the scenario even though
+    # whole-transcript WER would stay under threshold.
+    tail_check: str | None = None
     expect_failure: bool = False
     bundle_component: str | None = None  # e.g. "streaming-ner"
     tolerated_error_substring: str | None = None  # PASS-WITH-NOTE if seen
@@ -163,6 +173,20 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
             description="10 conns in batches of 5 with 2 s delay",
             connections=10,
             extra_args=["--batch-size", "5", "--batch-delay", "2"],
+        ),
+        # ---- Tail-finalize regression guard ----
+        StreamScenario(
+            name="tail_finalize_notail",
+            description="no-trailing-silence clip; CloseStream must finalize the last segment",
+            connections=1,
+            use_notail=True,
+            extra_args=["--extra", "endpointing=300", "--interim-results"],
+            tail_check="today",  # reference ends "...that we have today."
+            notes=(
+                "regression guard: binary CloseStream over the SageMaker bidi "
+                "transport must reach stem (shim reframe) AND the client must "
+                "drain before closing input, or the trailing segment is dropped"
+            ),
         ),
         # ---- Streaming-only features ----
         StreamScenario(
@@ -341,19 +365,20 @@ def run_scenario(
     language: str,
     short_wav: Path,
     long_wav: Path,
+    notail_wav: Path,
     long_loops: int,
     long_form_audio_s: float,
     stress_script: Path,
     log_dir: Path,
     subprocess_timeout_s: int,
 ) -> dict:
-    wav = long_wav if scenario.use_long_form else short_wav
+    if scenario.use_long_form:
+        wav, expected = long_wav, expected_text_for_loops(long_loops)
+    elif scenario.use_notail:
+        wav, expected = notail_wav, SPACEWALK_REFERENCE_TEXT
+    else:
+        wav, expected = short_wav, SPACEWALK_REFERENCE_TEXT
     timeout_s = _scenario_timeout_s(scenario, long_form_audio_s, subprocess_timeout_s)
-    expected = (
-        expected_text_for_loops(long_loops)
-        if scenario.use_long_form
-        else SPACEWALK_REFERENCE_TEXT
-    )
 
     summary_path = log_dir / f"{scenario.name}.summary.jsonl"
     stdout_path = log_dir / f"{scenario.name}.stdout.log"
@@ -496,6 +521,14 @@ def run_scenario(
         presence_ok = scenario.presence_check.lower() in combined.lower()
         notes_parts.append(f"presence({scenario.presence_check})={'ok' if presence_ok else 'MISSING'}")
 
+    # Tail guard: the reference's final word(s) must be present, catching a
+    # dropped trailing segment (tail truncation) that whole-transcript WER would
+    # mask. See StreamScenario.tail_check / the tail_finalize_notail scenario.
+    tail_ok = True
+    if scenario.tail_check and not tolerated:
+        tail_ok = scenario.tail_check.lower() in combined.lower()
+        notes_parts.append(f"tail({scenario.tail_check})={'ok' if tail_ok else 'TRUNCATED'}")
+
     if tolerated:
         notes_parts.append(
             f"BUNDLE-GAP: '{scenario.tolerated_error_substring}' "
@@ -511,6 +544,7 @@ def run_scenario(
             and finals > 0
             and w_ratio <= scenario.wer_threshold
             and presence_ok
+            and tail_ok
         )
     if scenario.name == "feature_interim_results" and interim_total == 0 and not tolerated:
         ok = False
@@ -642,6 +676,7 @@ def main() -> int:
 
     short_wav = workdir / "spacewalk.wav"
     long_wav = workdir / "spacewalk-15min.wav"
+    notail_wav = workdir / "spacewalk-notail.wav"
 
     print("=" * 80)
     print(f"Endpoint:    {args.endpoint_name}")
@@ -664,6 +699,12 @@ def main() -> int:
     _, _, long_dur = validate_pcm16(long_wav)
     print(f"Long-form:   {long_wav.name}  {long_dur:.0f}s ({loops} loops) "
           f"({long_wav.stat().st_size / (1024*1024):.1f} MB)")
+    # No-trailing-silence fixture for the tail-finalize regression guard.
+    if not notail_wav.exists() or args.force_download:
+        notail_dur = trim_trailing_silence(short_wav, notail_wav)
+    else:
+        _, _, notail_dur = validate_pcm16(notail_wav)
+    print(f"No-tail:     {notail_wav.name}  {notail_dur:.2f}s (trailing silence trimmed)")
 
     # 2. Locate the stress script (lives one directory up — e2e/ is a sibling of stt_wav_stress.py)
     stress_script = Path(__file__).resolve().parent.parent / "stt_wav_stress.py"
@@ -684,6 +725,7 @@ def main() -> int:
             language=args.language,
             short_wav=short_wav,
             long_wav=long_wav,
+            notail_wav=notail_wav,
             long_loops=loops,
             long_form_audio_s=long_dur,
             stress_script=stress_script,
