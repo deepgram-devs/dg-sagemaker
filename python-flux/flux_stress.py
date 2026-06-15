@@ -140,6 +140,13 @@ class DeepgramFluxConnection:
         self.request_id: str | None = None
         self.configure_success = 0
         self.configure_failure = 0
+        # The ConfigureSuccess ack echoes back the *full* applied config
+        # (thresholds/keyterms/language_hints), and ConfigureFailure carries a
+        # code/description. Counting acks only proves a response arrived;
+        # capturing the payload lets the e2e driver verify the server actually
+        # applied the requested change (or rejected it for the expected reason).
+        self.configure_acks: list[dict] = []      # one per ConfigureSuccess
+        self.configure_failures: list[dict] = []   # one per ConfigureFailure
         self.errored = False
         self.error_messages: list[str] = []
         self.session_start_at: float | None = None
@@ -417,6 +424,14 @@ class DeepgramFluxConnection:
             self.configure_success += 1
             thresholds = msg.get("thresholds", {})
             keyterms = msg.get("keyterms", [])
+            language_hints = msg.get("language_hints", [])
+            # Record the echoed config so the e2e driver can confirm the server
+            # applied exactly what was requested — not merely that it acked.
+            self.configure_acks.append({
+                "thresholds": thresholds,
+                "keyterms": keyterms,
+                "language_hints": language_hints,
+            })
             logger.info(
                 f"[Connection {self.connection_id}] ConfigureSuccess "
                 f"(thresholds={thresholds}, keyterms={keyterms})"
@@ -426,6 +441,7 @@ class DeepgramFluxConnection:
             self.configure_failure += 1
             code = msg.get("code", "")
             desc = msg.get("description", "")
+            self.configure_failures.append({"code": code, "description": desc})
             logger.warning(
                 f"[Connection {self.connection_id}] ConfigureFailure "
                 f"[{code}]: {desc or 'check that eager_eot_threshold ≤ eot_threshold'}"
@@ -556,6 +572,8 @@ class DeepgramFluxConnection:
             "event_counts": dict(self.event_counts),
             "configure_success": self.configure_success,
             "configure_failure": self.configure_failure,
+            "configure_acks": list(self.configure_acks),
+            "configure_failures": list(self.configure_failures),
             "languages_detected": sorted(self.languages_detected),
             "languages_hinted": sorted(self.languages_hinted),
             "combined_final_text": " ".join(self.eot_transcripts).strip(),

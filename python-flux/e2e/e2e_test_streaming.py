@@ -109,6 +109,14 @@ class FluxScenario:
       - `min_eager_turns`: require ≥ N EagerEndOfTurn events (eager mode).
       - `expect_configure_success` / `expect_configure_failure`: require a
         ConfigureSuccess / ConfigureFailure ack from the mid-stream Configure.
+      - `expect_applied_thresholds`: with `expect_configure_success`, require
+        the ConfigureSuccess echo to report these exact applied threshold values
+        (the docs guarantee the ack echoes the full applied config) — proves the
+        server applied the requested change, not merely that it acked.
+      - `expect_configure_failure_code`: with `expect_configure_failure`,
+        case-insensitive substring the ConfigureFailure `code`/`description`
+        must contain (e.g. `INVALID_THRESHOLD`) — proves the rejection carried
+        the expected reason.
       - `expect_languages`: soft note — record detected languages (only the
         multilingual model populates them); never fails the scenario.
       - `expect_failure`: the connection is expected to error (negative test);
@@ -128,6 +136,8 @@ class FluxScenario:
     min_eager_turns: int = 0
     expect_configure_success: bool = False
     expect_configure_failure: bool = False
+    expect_applied_thresholds: dict[str, float] | None = None
+    expect_configure_failure_code: str | None = None
     expect_languages: bool = False
     expect_failure: bool = False
     tolerated_error_substring: str | None = None
@@ -245,6 +255,7 @@ def default_scenarios(model: str = DEFAULT_MODEL) -> list[FluxScenario]:
             description="mid-stream Configure raises eot_threshold to 0.8",
             extra_args=["--reconfigure-after", "5", "--reconfigure-eot-threshold", "0.8"],
             expect_configure_success=True,
+            expect_applied_thresholds={"eot_threshold": 0.8},
             tolerated_error_substring="Configure",
             notes="ConfigureSuccess expected; PASS-WITH-NOTE on bundles that reject "
                   "Configure as an unknown variant (e.g. CloseStream-only builds)",
@@ -258,6 +269,7 @@ def default_scenarios(model: str = DEFAULT_MODEL) -> list[FluxScenario]:
                 "--reconfigure-eager-eot-threshold", "0.9",
             ],
             expect_configure_failure=True,
+            expect_configure_failure_code="threshold",
             tolerated_error_substring="Configure",
             notes="ConfigureFailure expected; PASS-WITH-NOTE on bundles that reject "
                   "Configure as an unknown variant",
@@ -347,6 +359,19 @@ def _read_summary(summary_path: Path) -> list[dict]:
     return [json.loads(l) for l in summary_path.read_text().splitlines() if l.strip()]
 
 
+def _threshold_matches(got, want, tol: float = 1e-6) -> bool:
+    """True if an echoed threshold equals the requested value.
+
+    Thresholds round-trip through JSON as floats, so compare numerics with a
+    small tolerance; fall back to exact equality for anything non-numeric.
+    """
+    if got is None:
+        return False
+    if isinstance(got, (int, float)) and isinstance(want, (int, float)):
+        return abs(float(got) - float(want)) <= tol
+    return got == want
+
+
 def run_scenario(
     scenario: FluxScenario,
     *,
@@ -415,6 +440,8 @@ def run_scenario(
     total_eager = sum(r.get("turns_eager", 0) for r in rows)
     cfg_ok = sum(r.get("configure_success", 0) for r in rows)
     cfg_fail = sum(r.get("configure_failure", 0) for r in rows)
+    cfg_acks = [a for r in rows for a in (r.get("configure_acks") or [])]
+    cfg_failures = [f for r in rows for f in (r.get("configure_failures") or [])]
     all_error_text = " ".join(
         m for r in rows for m in (r.get("error_messages") or [])
     ).lower()
@@ -483,11 +510,53 @@ def run_scenario(
         cfg = cfg_ok >= 1
         checks.append(cfg)
         notes_parts.append(f"configure_success={'ok' if cfg else 'MISSING'}")
+        # The ConfigureSuccess ack echoes the full applied config. Verify the
+        # server actually applied the requested thresholds — not merely that an
+        # ack arrived. (Without this, a no-op/ignored Configure still "passes".)
+        if scenario.expect_applied_thresholds:
+            applied = {
+                k: v
+                for ack in cfg_acks
+                for k, v in (ack.get("thresholds") or {}).items()
+            }
+            mismatches = {
+                k: (want, applied.get(k))
+                for k, want in scenario.expect_applied_thresholds.items()
+                if not _threshold_matches(applied.get(k), want)
+            }
+            applied_ok = cfg and not mismatches
+            checks.append(applied_ok)
+            if mismatches:
+                notes_parts.append(f"applied_threshold_MISMATCH={mismatches}")
+            else:
+                notes_parts.append(
+                    "applied_thresholds=" + ",".join(
+                        f"{k}={applied.get(k)}" for k in scenario.expect_applied_thresholds
+                    )
+                )
 
     if scenario.expect_configure_failure:
         cfg = cfg_fail >= 1
         checks.append(cfg)
         notes_parts.append(f"configure_failure={'ok' if cfg else 'MISSING'}")
+        # A bare count proves a ConfigureFailure arrived; the docs guarantee it
+        # also carries a code + description. Verify the rejection names the
+        # expected reason so we know it failed for the right cause.
+        if scenario.expect_configure_failure_code:
+            reason_text = " ".join(
+                f"{f.get('code', '')} {f.get('description', '')}" for f in cfg_failures
+            ).lower()
+            reason_ok = (
+                cfg and scenario.expect_configure_failure_code.lower() in reason_text
+            )
+            checks.append(reason_ok)
+            if reason_ok:
+                notes_parts.append(f"failure_reason~'{scenario.expect_configure_failure_code}'")
+            else:
+                notes_parts.append(
+                    f"failure_reason_MISMATCH (want~'{scenario.expect_configure_failure_code}', "
+                    f"got='{reason_text[:80]}')"
+                )
 
     if scenario.expect_languages:
         notes_parts.append(f"languages={languages or 'none'}")  # soft note only
