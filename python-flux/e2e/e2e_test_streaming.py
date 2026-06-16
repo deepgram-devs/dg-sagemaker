@@ -119,6 +119,9 @@ class FluxScenario:
         the expected reason.
       - `expect_languages`: soft note — record detected languages (only the
         multilingual model populates them); never fails the scenario.
+      - `min_session_duration_s`: require the longest connection to have stayed
+        open at least this long (e.g. the keepalive-idle test must span the full
+        idle gap). Guards against the idle hold being skipped.
       - `expect_failure`: the connection is expected to error (negative test);
         WER is skipped and the scenario PASSES iff a connection errored.
       - `tolerated_error_substring`: PASS-WITH-NOTE when the endpoint returns
@@ -139,6 +142,7 @@ class FluxScenario:
     expect_applied_thresholds: dict[str, float] | None = None
     expect_configure_failure_code: str | None = None
     expect_languages: bool = False
+    min_session_duration_s: float | None = None
     expect_failure: bool = False
     tolerated_error_substring: str | None = None
     notes: str = ""
@@ -162,8 +166,10 @@ def default_scenarios(model: str = DEFAULT_MODEL) -> list[FluxScenario]:
       eot_timeout_ms (500–10000, def 5000), keyterm (repeatable),
       language_hint (repeatable; multi only), mip_opt_out, tag.
     In-band control messages: Configure (thresholds / keyterms / language_hints),
-      KeepAlive, Finalize, CloseStream (KeepAlive/Finalize PASS-WITH-NOTE on
-      bundles that implement only CloseStream + Configure).
+      Finalize, CloseStream (Finalize PASS-WITH-NOTE on bundles that implement
+      only CloseStream + Configure). Connection liveness across a silence gap is
+      exercised separately (feature_keepalive_idle): Flux has no JSON KeepAlive
+      (Nova-only), so the client holds the stream open with tiny binary frames.
 
     Not covered here (need re-encoded fixtures we don't generate): non-linear16
     encodings (mulaw/alaw/opus) and alternate sample rates — the canonical
@@ -275,12 +281,19 @@ def default_scenarios(model: str = DEFAULT_MODEL) -> list[FluxScenario]:
                   "Configure as an unknown variant",
         ),
         FluxScenario(
-            name="feature_keepalive",
-            description="--keepalive-interval 3 (periodic KeepAlive)",
-            extra_args=["--keepalive-interval", "3"],
-            tolerated_error_substring="KeepAlive",
-            notes="KeepAlive when supported; older bundles reject it as an "
-                  "unknown variant (PASS-WITH-NOTE)",
+            name="feature_keepalive_idle",
+            description="hold the stream open through a 65 s silence gap with a "
+                        "keepalive ping every 10 s, then transcribe",
+            # Flux has no JSON KeepAlive (Nova-only) and the SageMaker transport
+            # exposes no WS-ping primitive, so the client keeps the connection
+            # alive across the idle gap by sending a tiny binary frame. A passing
+            # WER on the audio that streams AFTER the gap proves the connection
+            # survived >60 s of silence; min_session_duration_s guards against the
+            # idle hold being skipped.
+            extra_args=["--idle-before-audio", "65", "--keepalive-interval", "10"],
+            min_session_duration_s=60.0,
+            notes="connection must survive >60 s idle kept alive by tiny binary "
+                  "frames; post-idle transcription is the proof",
         ),
         FluxScenario(
             name="feature_finalize",
@@ -341,16 +354,28 @@ def _stress_cmd(
     return cmd
 
 
+def _extra_arg_value(extra_args: list[str], flag: str) -> str | None:
+    """Return the value following `flag` in an `extra_args` list, or None."""
+    try:
+        return extra_args[extra_args.index(flag) + 1]
+    except (ValueError, IndexError):
+        return None
+
+
 def _scenario_timeout_s(scenario: FluxScenario, long_form_audio_s: float, base_timeout_s: int) -> int:
     """Per-scenario subprocess timeout.
 
     File mode paces audio to real time, so long-form scenarios need at least
-    the audio duration plus headroom for connect / final turns / teardown.
+    the audio duration plus headroom for connect / final turns / teardown, and
+    idle-hold scenarios need the silence gap on top of the short-form budget.
     """
-    if not scenario.use_long_form:
-        return base_timeout_s
-    headroom = max(300.0, long_form_audio_s * 0.3)
-    return int(long_form_audio_s + headroom)
+    if scenario.use_long_form:
+        headroom = max(300.0, long_form_audio_s * 0.3)
+        return int(long_form_audio_s + headroom)
+    idle_s = _extra_arg_value(scenario.extra_args, "--idle-before-audio")
+    if idle_s:
+        return int(base_timeout_s + float(idle_s))
+    return base_timeout_s
 
 
 def _read_summary(summary_path: Path) -> list[dict]:
@@ -560,6 +585,15 @@ def run_scenario(
 
     if scenario.expect_languages:
         notes_parts.append(f"languages={languages or 'none'}")  # soft note only
+
+    if scenario.min_session_duration_s:
+        longest = max((r.get("session_duration_s") or 0.0) for r in rows)
+        dur_ok = longest >= scenario.min_session_duration_s
+        checks.append(dur_ok)
+        notes_parts.append(
+            f"session_dur={longest:.0f}s"
+            + ("" if dur_ok else f" TOO SHORT (<{scenario.min_session_duration_s:.0f}s)")
+        )
 
     ok = all(checks)
     return _row(scenario, ok, w_ratio, (s, d, i), n, elapsed, notes_parts,

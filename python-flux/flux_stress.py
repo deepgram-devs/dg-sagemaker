@@ -15,8 +15,15 @@ format used by Nova models.
 Supported Flux input messages:
   - Binary audio frames (raw PCM bytes)
   - Configure   (update thresholds/keyterms mid-stream)
-  - KeepAlive   (prevent idle timeout)
   - CloseStream (gracefully terminate the stream)
+
+Note: Flux has no JSON ``{"type":"KeepAlive"}`` control message — that is a
+Nova-only mechanism. Flux keeps a connection alive at the WebSocket layer
+(standard WS ping). The SageMaker bidirectional-stream transport exposes no
+WS-ping primitive (only UTF8/BINARY payload parts), so to hold a connection
+open through a silence gap this client sends a minimal binary frame (a tiny
+silent PCM chunk); any frame resets the server's idle timer. See
+``send_keepalive_ping`` / ``--idle-before-audio``.
 
 Supported Flux output messages:
   - Connected        (stream established)
@@ -62,6 +69,18 @@ DEFAULT_MIC_SAMPLE_RATE = 16000
 # Deepgram recommends 80ms audio chunks for Flux
 AUDIO_CHUNK_MS = 80
 
+# Minimal "keepalive ping" payload: a single 16-bit silent PCM sample (2 bytes,
+# value 0). Flux has no JSON KeepAlive control message (Nova-only); to keep a
+# connection alive through a silence gap we send the smallest valid binary frame
+# we can. It must be sample-aligned (even byte count for linear16) so it doesn't
+# corrupt the real audio stream, and silence so it has no transcript effect — the
+# point is purely to send *a* frame and reset the server's idle timer.
+KEEPALIVE_PING_BYTES = b"\x00\x00"
+
+# Default cadence for keepalive pings during an idle hold when --keepalive-interval
+# is not given. Well under typical 60s WS/HTTP2 idle timeouts.
+DEFAULT_IDLE_KEEPALIVE_S = 10.0
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,9 +89,17 @@ class MidStreamPlan:
     """Optional mid-stream control-message schedule for a file-mode stream.
 
     Lets the e2e driver exercise Flux's distinctive in-band control messages
-    (Configure / KeepAlive / Finalize) deterministically while a WAV streams:
+    (Configure / Finalize) and connection-liveness behaviour deterministically
+    while a WAV streams:
 
-    - ``keepalive_interval_s``: send a ``KeepAlive`` every N seconds.
+    - ``idle_before_audio_s``: before streaming any audio, hold the connection
+      open for N seconds of silence, sending only a tiny binary keepalive frame
+      every ``keepalive_interval_s`` (or :data:`DEFAULT_IDLE_KEEPALIVE_S`). The
+      audio that follows must still transcribe correctly — that is the
+      end-to-end proof the connection survived the idle gap.
+    - ``keepalive_interval_s``: cadence for the tiny binary keepalive frame
+      (used during the idle hold above, and also interleaved while audio
+      streams). NOT a JSON ``KeepAlive`` message — that is Nova-only.
     - ``reconfigure_after_s``: send a single ``Configure`` once N seconds of
       audio have streamed, applying any of the reconfigure_* fields. Useful for
       asserting ``ConfigureSuccess`` (valid change) or ``ConfigureFailure``
@@ -81,6 +108,7 @@ class MidStreamPlan:
       flush the final turn before ``CloseStream``.
     """
     keepalive_interval_s: float | None = None
+    idle_before_audio_s: float | None = None
     reconfigure_after_s: float | None = None
     reconfigure_eot_threshold: float | None = None
     reconfigure_eager_eot_threshold: float | None = None
@@ -93,6 +121,7 @@ class MidStreamPlan:
     def active(self) -> bool:
         return (
             self.keepalive_interval_s is not None
+            or self.idle_before_audio_s is not None
             or self.reconfigure_after_s is not None
             or self.finalize_at_end
         )
@@ -295,12 +324,29 @@ class DeepgramFluxConnection:
         await self._send_json(message)
         logger.debug(f"[Connection {self.connection_id}] Sent Configure: {message}")
 
-    async def send_keep_alive(self):
-        """Send a KeepAlive message to prevent idle timeout."""
+    async def send_keepalive_ping(self):
+        """Send a minimal binary frame to keep the connection alive during silence.
+
+        Flux has no JSON ``KeepAlive`` control message (that is Nova-only) and
+        the SageMaker bidirectional-stream transport exposes no WebSocket-ping
+        primitive — only UTF8/BINARY payload parts. So we send the smallest
+        valid binary audio frame we can (:data:`KEEPALIVE_PING_BYTES`, one silent
+        16-bit sample); any frame resets the server's idle timer, and silence has
+        no transcript effect.
+        """
         if not self.is_active:
             return
-        await self._send_json({"type": "KeepAlive"})
-        logger.debug(f"[Connection {self.connection_id}] Sent KeepAlive")
+        try:
+            payload = RequestPayloadPart(bytes_=KEEPALIVE_PING_BYTES)
+            event = RequestStreamEventPayloadPart(value=payload)
+            await self.stream.input_stream.send(event)
+            self.byte_count += len(KEEPALIVE_PING_BYTES)
+            logger.debug(f"[Connection {self.connection_id}] Sent keepalive ping")
+        except Exception as e:
+            logger.error(
+                f"[Connection {self.connection_id}] Error sending keepalive ping: {e}"
+            )
+            self.is_active = False
 
     async def send_finalize(self):
         """
@@ -971,6 +1017,17 @@ class FileFluxClient(BaseFluxClient):
         keepalive_interval = plan.keepalive_interval_s
         reconfigure_after = plan.reconfigure_after_s
 
+        # Hold the connection open through a leading silence gap before any audio,
+        # sending only tiny binary keepalive frames. If the connection dies during
+        # this gap, the audio streamed afterwards won't transcribe — so a passing
+        # WER on the audio below is the end-to-end proof it survived the idle.
+        if plan.idle_before_audio_s:
+            await self._hold_idle_with_keepalive(
+                conn,
+                plan.idle_before_audio_s,
+                keepalive_interval or DEFAULT_IDLE_KEEPALIVE_S,
+            )
+
         stream_start = time.monotonic()
         total_chunks = 0
         play_count = 0
@@ -999,9 +1056,9 @@ class FileFluxClient(BaseFluxClient):
                     )
                     reconfigure_pending = False
 
-                # Periodic KeepAlive.
+                # Periodic keepalive ping (tiny binary frame; not a JSON KeepAlive).
                 if next_keepalive is not None and keepalive_interval and rel >= next_keepalive:
-                    await conn.send_keep_alive()
+                    await conn.send_keepalive_ping()
                     next_keepalive += keepalive_interval
 
                 # Pace delivery to real-time speed.
@@ -1021,6 +1078,38 @@ class FileFluxClient(BaseFluxClient):
         logger.debug(
             f"[Connection {conn.connection_id}] Finished streaming "
             f"({play_count} pass(es), {total_chunks} chunks)"
+        )
+
+    async def _hold_idle_with_keepalive(
+        self,
+        conn: DeepgramFluxConnection,
+        duration_s: float,
+        interval_s: float,
+    ):
+        """Hold ``conn`` open for ``duration_s`` of silence, sending a tiny binary
+        keepalive frame every ``interval_s``.
+
+        Used to verify a Flux connection survives a long idle gap. Flux relies on
+        WebSocket ping for liveness (no JSON KeepAlive — that is Nova-only), but
+        the SageMaker transport gives us no WS-ping primitive, so we send minimal
+        binary frames instead; any frame resets the server's idle timer. Stops
+        early if the connection drops (``conn.is_active`` goes False), so the
+        downstream audio phase / assertions see the failure.
+        """
+        logger.info(
+            f"[Connection {conn.connection_id}] Idle hold: {duration_s:.0f}s of "
+            f"silence, keepalive ping every {interval_s:.0f}s"
+        )
+        deadline = time.monotonic() + duration_s
+        while conn.is_active and self.is_active and time.monotonic() < deadline:
+            await conn.send_keepalive_ping()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(interval_s, remaining))
+        logger.info(
+            f"[Connection {conn.connection_id}] Idle hold complete "
+            f"(active={conn.is_active})"
         )
 
 
@@ -1371,6 +1460,7 @@ def _mid_stream_plan_from_args(args) -> MidStreamPlan:
     """Build a MidStreamPlan from the file-subcommand control-message flags."""
     return MidStreamPlan(
         keepalive_interval_s=getattr(args, "keepalive_interval", None),
+        idle_before_audio_s=getattr(args, "idle_before_audio", None),
         reconfigure_after_s=getattr(args, "reconfigure_after", None),
         reconfigure_eot_threshold=getattr(args, "reconfigure_eot_threshold", None),
         reconfigure_eager_eot_threshold=getattr(args, "reconfigure_eager_eot_threshold", None),
@@ -1415,14 +1505,21 @@ async def run_file(args) -> int:
         else ("until file ends (looping)" if args.loop else "until file ends or Ctrl+C")
     )
 
-    _print_banner(args, [
+    banner_extras = [
         f"Input:         file ({args.file})",
         f"File Duration: {client.duration_seconds:.2f}s",
         f"Sample Rate:   {client.sample_rate} Hz",
         f"Channels:      {client.channels}",
         f"Loop:          {'yes' if args.loop else 'no'}",
         f"Limit:         {limit_str}",
-    ])
+    ]
+    if getattr(args, "idle_before_audio", None):
+        ka = getattr(args, "keepalive_interval", None) or DEFAULT_IDLE_KEEPALIVE_S
+        banner_extras.append(
+            f"Idle hold:     {args.idle_before_audio:.0f}s silence before audio "
+            f"(keepalive ping every {ka:.0f}s)"
+        )
+    _print_banner(args, banner_extras)
 
     plan = _mid_stream_plan_from_args(args)
 
@@ -1796,7 +1893,20 @@ async def main() -> int:
         type=float,
         default=None,
         metavar="SECONDS",
-        help="Send a KeepAlive message every N seconds while streaming",
+        help="Send a tiny binary keepalive frame every N seconds (during the "
+             "idle hold and while streaming). NOT a JSON KeepAlive — that is "
+             "Nova-only; Flux keeps alive via WS ping / continued frames.",
+    )
+    file_parser.add_argument(
+        "--idle-before-audio",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Before streaming audio, hold the connection open for N seconds of "
+             "silence, sending only tiny binary keepalive frames every "
+             "--keepalive-interval (default %ss). Verifies the connection "
+             "survives a long idle gap: the audio that follows must still "
+             "transcribe." % int(DEFAULT_IDLE_KEEPALIVE_S),
     )
     file_parser.add_argument(
         "--finalize-at-end",

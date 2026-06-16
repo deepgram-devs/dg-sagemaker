@@ -135,7 +135,8 @@ my-flux-endpoint-dev     Creating   2026-03-10 08:00:13   2026-03-10 08:00:13
 | `--summary-jsonl PATH` | *(none)* | Write a per-connection JSON summary (turns, Configure acks, errors) — consumed by the e2e driver |
 | `--batch-size N` | *(all at once)* | Open connections in batches of N (ramp-up) |
 | `--batch-delay SECONDS` | `0` | Delay between connection batches |
-| `--keepalive-interval SECONDS` | *(off)* | Send a `KeepAlive` every N seconds while streaming |
+| `--keepalive-interval SECONDS` | *(off)* | Send a tiny binary keepalive frame every N seconds (during the idle hold and while streaming). **Not** a JSON `KeepAlive` — that's Nova-only; Flux keeps alive via WebSocket ping / continued frames |
+| `--idle-before-audio SECONDS` | *(off)* | Hold the connection open for N seconds of silence **before** streaming audio, sending only keepalive frames (every `--keepalive-interval`, default 10s). Verifies the connection survives a long idle gap — the audio that follows must still transcribe |
 | `--finalize-at-end` | *(off)* | Send `Finalize` after the last audio chunk to flush the final turn |
 | `--reconfigure-after SECONDS` | *(off)* | Send one mid-stream `Configure` after N seconds (with the `--reconfigure-*` values below) — exercises `ConfigureSuccess`/`ConfigureFailure` |
 | `--reconfigure-eot-threshold` / `--reconfigure-eager-eot-threshold` / `--reconfigure-eot-timeout-ms` / `--reconfigure-keyterms` / `--reconfigure-language-hints` | *(none)* | Values applied in the mid-stream `Configure` |
@@ -264,9 +265,15 @@ Legend:
 |---|---|---|
 | Audio | Binary bytes | Raw PCM audio (80ms chunks recommended) |
 | `Configure` | JSON text | Update thresholds or keyterms mid-stream |
-| `KeepAlive` | JSON text | Prevent idle timeout |
 | `Finalize` | JSON text | Flush buffered audio; force end current turn |
 | `CloseStream` | JSON text | Gracefully terminate the stream |
+
+> **No `KeepAlive` message.** Unlike Nova (`/v1/listen`), Flux has no JSON
+> `{"type":"KeepAlive"}` control message — it relies on the WebSocket ping for
+> idle liveness. Over the SageMaker bidirectional-stream transport there's no
+> WS-ping primitive (only UTF8/BINARY payload parts), so this client holds a
+> connection open through silence by sending a minimal binary frame; any frame
+> resets the server's idle timer (see `--idle-before-audio`).
 
 ### Server → Client messages
 
@@ -339,7 +346,7 @@ uv run e2e/e2e_test_streaming.py --list --model flux-general-multi
 | `feature_mip_opt_out` | `mip_opt_out=true` (smoke) |
 | `feature_configure_thresholds` | mid-stream `Configure` → asserts `ConfigureSuccess`; PASS-WITH-NOTE on `CloseStream`-only bundles that reject `Configure` |
 | `feature_configure_failure` | mid-stream `Configure` with `eager > eot` → asserts `ConfigureFailure`; PASS-WITH-NOTE on bundles that reject `Configure` |
-| `feature_keepalive` | `--keepalive-interval 3` — PASS-WITH-NOTE on bundles that reject `KeepAlive` as an unknown variant |
+| `feature_keepalive_idle` | `--idle-before-audio 65 --keepalive-interval 10` — holds the stream open through a 65 s silence gap with tiny binary keepalive frames, then transcribes; asserts WER + `session_duration ≥ 60 s`. Post-idle transcription is the proof the connection survived |
 | `feature_finalize` | `--finalize-at-end` — PASS-WITH-NOTE on bundles that reject `Finalize` as an unknown variant |
 | `feature_lang_hint_multi` *(multilingual model only)* | `language_hint en` — asserts `TurnInfo.languages` populated |
 | `negative_lang_hint_on_en` *(English-only model only)* | `language_hint es` — expects rejection (HTTP 400; not supported on `flux-general-en`) |
@@ -356,11 +363,13 @@ Parameter coverage is scoped to the Flux docs
 
 **In-band control-message support is bundle-versioned.** Observed against the
 deployed packages: `flux-english-20260311` accepts only `CloseStream`;
-`flux-multi-20260417` adds `Configure`; neither accepts `KeepAlive` or
-`Finalize` (rejected as `UNPARSABLE_CLIENT_MESSAGE: unknown variant`). The
-`feature_configure_*` / `feature_keepalive` / `feature_finalize` scenarios
-PASS-WITH-NOTE when the message is rejected and pass outright once a bundle
-implements it — so the suite stays green across versions without hiding the gap.
+`flux-multi-20260417` adds `Configure`; neither accepts `Finalize` (rejected as
+`UNPARSABLE_CLIENT_MESSAGE: unknown variant`). The `feature_configure_*` /
+`feature_finalize` scenarios PASS-WITH-NOTE when the message is rejected and
+pass outright once a bundle implements it — so the suite stays green across
+versions without hiding the gap. `feature_keepalive_idle` uses no control
+message (just binary frames), so it is not bundle-gated: it fails for real if a
+connection can't survive a 60 s idle gap.
 
 ## Self-Hosted / SageMaker Notes
 
