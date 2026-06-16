@@ -34,8 +34,20 @@ const sagemakerRuntimeClientForBidi = new SageMakerRuntimeHTTP2Client({
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms)).then(() => console.log("Sleeping completed!"));
 
+// After CloseStream, wait up to this long for the server to flush remaining
+// transcripts and close the response stream before we close the input stream.
+const DRAIN_TIMEOUT_MS = 15000;
+
+// A promise + its resolver, used to signal the request generator that the
+// response stream has fully drained so it can close the input stream.
+function createDeferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>(r => { resolve = r; });
+    return { promise, resolve };
+}
+
 // Create an async iterable for streaming WAV file chunks from the local filesystem
-async function* createWavFileRequestStream(wavFilePath: string, chunkSize: number = 1024*1024) { // Default 1MB chunks
+async function* createWavFileRequestStream(wavFilePath: string, responseDone: Promise<void>, chunkSize: number = 1024*1024) { // Default 1MB chunks
     const KEEPALIVE_INTERVAL = 6000; // 3 seconds
     let lastKeepaliveTime = Date.now();
     
@@ -106,33 +118,10 @@ async function* createWavFileRequestStream(wavFilePath: string, chunkSize: numbe
         }
         
         console.log(`Finished streaming WAV file: ${chunkNumber} chunks, ${totalBytesRead} total bytes`);
-        
-        // Continue sending keepalive messages after audio streaming is complete
-        console.log('Audio streaming complete. Continuing to send keepalive messages...');
-        const keepaliveEndTime = Date.now() + 120000; // Keep alive for 120 seconds
-        
-        while (Date.now() < keepaliveEndTime) {
-            const now = Date.now();
-            if (now - lastKeepaliveTime >= KEEPALIVE_INTERVAL) {
-                const timestamp = new Date(now).toISOString();
-                console.log(`Sending post-stream keepalive message at ${timestamp}...`);
-                yield {
-                    PayloadPart: {
-                        Bytes: new TextEncoder().encode(JSON.stringify({
-                            type: "KeepAlive",
-                            timestamp: timestamp
-                        })),
-                        DataType: "UTF8",
-                    },
-                };
-                lastKeepaliveTime = now;
-            }
-            // Small sleep to prevent tight loop
-            await sleep(3000);
-        }
 
-        // Close the connection after receiving all the response messages
-        console.log('Sending WebSocket close stream message');
+        // Signal end-of-audio so the server finalizes and flushes the trailing
+        // transcript (https://developers.deepgram.com/docs/close-stream).
+        console.log('Sending CloseStream message...');
         yield {
             PayloadPart: {
                 Bytes: new TextEncoder().encode(JSON.stringify({
@@ -141,8 +130,19 @@ async function* createWavFileRequestStream(wavFilePath: string, chunkSize: numbe
                 DataType: "UTF8",
             },
         };
-        
-        console.log('Keepalive period completed.');
+
+        // Wait for the response stream to drain (server finalize + clean close)
+        // BEFORE returning. Returning ends this async iterable, which closes the
+        // input stream — and closing it immediately after CloseStream races the
+        // server's finalize and drops the trailing transcript. Mirrors
+        // stt_wav_stress.py's drain-before-close ordering; bounded by a timeout
+        // so a stuck server can't hang the client.
+        console.log('CloseStream sent; waiting for final responses before closing input...');
+        await Promise.race([
+            responseDone,
+            new Promise<void>(resolve => setTimeout(resolve, DRAIN_TIMEOUT_MS)),
+        ]);
+        console.log('Drain complete; closing input stream.');
     } finally {
         streamActive = false;
         clearInterval(keepaliveInterval);
@@ -209,10 +209,14 @@ async function invokeEndpointWithBidirectionalStream(): Promise<InvokeEndpointWi
         await sleep(2000);
     }
 
+    // Resolved by the response-reading loop once the server has closed the
+    // response stream; the request generator awaits it before closing input.
+    const responseDone = createDeferred<void>();
+
     const invokeParams: InvokeEndpointWithBidirectionalStreamCommandInput = {
         EndpointName: config.endpointName,
         // Body: createRequestStream() // as AsyncIterable<RequestEventStream>
-        Body: createWavFileRequestStream(inputFilePath), // as AsyncIterable<RequestEventStream>
+        Body: createWavFileRequestStream(inputFilePath, responseDone.promise), // as AsyncIterable<RequestEventStream>
         ModelInvocationPath: modelInvocationPath,
         ModelQueryString: modelQueryString,
     };
@@ -260,9 +264,15 @@ async function invokeEndpointWithBidirectionalStream(): Promise<InvokeEndpointWi
                 clearTimeout(timeout);
                 console.error('Error processing bidirectional stream:', streamError);
                 throw streamError;
+            } finally {
+                // Unblock the request generator's drain wait — the response
+                // stream is fully read (or errored), so it's now safe to close
+                // the input stream.
+                responseDone.resolve();
             }
         } else {
             console.log('No bidirectional response body received');
+            responseDone.resolve();
         }
 
         console.log('Bidirectional endpoint invocation completed successfully');

@@ -15,6 +15,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -46,6 +48,9 @@ public class StreamingConnection {
     // (see https://developers.deepgram.com/docs/close-stream)
     private static final byte[] CLOSE_STREAM_BYTES =
         "{\"type\":\"CloseStream\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    // After CloseStream, wait up to this long for the server to flush remaining
+    // transcripts and close the response stream before we close our input.
+    private static final int AWAIT_FINAL_RESULTS_SECONDS = 15;
 
     private final int connectionId;
     private final SageMakerRuntimeHttp2AsyncClient client;
@@ -69,6 +74,10 @@ public class StreamingConnection {
     // Streaming state
     private volatile CompletableFuture<Void> streamFuture;
     private volatile AudioPublisher audioPublisher;
+    // Counted down when the server finishes responding (response stream closed
+    // cleanly or errored). streamAudio awaits this between CloseStream and the
+    // input-stream close so we drain the server's finalize before closing.
+    private volatile CountDownLatch responseComplete;
 
     // Timing
     private final AtomicLong startTimeNanos = new AtomicLong();
@@ -191,13 +200,22 @@ public class StreamingConnection {
 
         CompletableFuture<Void> errorFuture = new CompletableFuture<>();
 
+        // Fresh per stream attempt. Counted down when the server stops
+        // responding — either it closes the response stream cleanly (onComplete)
+        // or errors (onError). streamAudio's finally awaits this after sending
+        // CloseStream and before completing (closing) the input publisher.
+        CountDownLatch responseDone = new CountDownLatch(1);
+        this.responseComplete = responseDone;
+
         InvokeEndpointWithBidirectionalStreamResponseHandler responseHandler =
             InvokeEndpointWithBidirectionalStreamResponseHandler.builder()
                 .onResponse(r -> log.debug("[Conn {}] Initial response received", connectionId))
                 .onError(t -> {
+                    responseDone.countDown();
                     errorFuture.completeExceptionally(t);
                 })
                 .onComplete(() -> {
+                    responseDone.countDown();
                     log.debug("[Conn {}] Stream complete", connectionId);
                 })
                 .subscriber(InvokeEndpointWithBidirectionalStreamResponseHandler.Visitor.builder()
@@ -350,9 +368,23 @@ public class StreamingConnection {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
-            // Send CloseStream so Deepgram flushes the final transcript before
-            // closing (https://developers.deepgram.com/docs/close-stream).
+            // Well-behaved close ordering (mirrors stt_wav_stress.py): send
+            // CloseStream, then wait for the server to flush the trailing
+            // transcript and close the response stream, and ONLY THEN complete
+            // (close) our input stream. Completing the input publisher ends the
+            // request stream — which tears down the response stream — so closing
+            // it immediately after CloseStream races the server's finalize and
+            // drops the tail (https://developers.deepgram.com/docs/close-stream).
             audioPublisher.publish(CLOSE_STREAM_BYTES);
+            try {
+                CountDownLatch rc = responseComplete;
+                if (rc != null && !rc.await(AWAIT_FINAL_RESULTS_SECONDS, TimeUnit.SECONDS)) {
+                    log.warn("[Conn {}] Timeout ({}s) waiting for final responses; closing input anyway",
+                        connectionId, AWAIT_FINAL_RESULTS_SECONDS);
+                }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
             audioPublisher.complete();
             log.info("[Conn {}] Audio streaming done ({} passes, {} chunks)",
                 connectionId, playCount, totalChunks);
@@ -362,13 +394,11 @@ public class StreamingConnection {
     public void stop() {
         stopped.set(true);
         active.set(false);
-        if (audioPublisher != null) {
-            // Enqueue CloseStream BEFORE complete() so the streamAudio finally
-            // fallback isn't the only path — graceful shutdown via stop() also
-            // sends the documented end-of-stream signal.
-            audioPublisher.publish(CLOSE_STREAM_BYTES);
-            audioPublisher.complete();
-        }
+        // Don't send CloseStream or complete the publisher here. Once the read
+        // loop observes active=false it exits and streamAudio's finally performs
+        // the CloseStream -> drain -> complete sequence. Completing the input
+        // here would close it before the drain and race the server's finalize,
+        // dropping the tail — the same bug fixed in stt_wav_stress.py.
     }
 
     // --- Accessors ---

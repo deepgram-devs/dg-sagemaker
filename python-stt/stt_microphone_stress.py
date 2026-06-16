@@ -82,6 +82,7 @@ class DeepgramSageMakerConnection:
         self.stream = None
         self.output_stream = None
         self.is_active = False
+        self._ended = False
         self.response_task = None
         self.chunk_count = 0
 
@@ -239,16 +240,34 @@ class DeepgramSageMakerConnection:
         except Exception as e:
             logger.error(f"[Connection {self.connection_id}] Error processing responses: {e}", exc_info=True)
 
+    async def _close_input_stream(self):
+        """Close the input (request) stream, logging but not raising on error."""
+        try:
+            await self.stream.input_stream.close()
+        except Exception as e:
+            logger.error(f"[Connection {self.connection_id}] Error closing input stream: {e}")
+
     async def end_session(self):
-        """Close the streaming session"""
-        if not self.is_active:
+        """Close the streaming session.
+
+        Well-behaved close ordering (mirrors stt_wav_stress.py): send CloseStream,
+        drain the response stream until the server finalizes the trailing segment
+        and closes it on its own, and ONLY THEN close our input stream. Closing
+        the input stream is rendered to the SageMaker container as a WebSocket
+        Close; doing it immediately after CloseStream races the server's finalize
+        and drops the trailing transcript
+        (https://developers.deepgram.com/docs/close-stream). This connection's
+        is_active is held True across the drain (the client-level is_active is the
+        stop signal) so _process_responses keeps reading finals until the clean
+        close.
+        """
+        if self._ended or self.stream is None:
             return
+        self._ended = True
 
         logger.debug(f"[Connection {self.connection_id}] Ending session")
-        self.is_active = False
 
-        # Send Deepgram CloseStream so the server flushes the final transcript
-        # before closing (https://developers.deepgram.com/docs/close-stream).
+        # 1. Send CloseStream so the server flushes the final transcript.
         try:
             close_msg = json.dumps({"type": "CloseStream"}).encode("utf-8")
             payload = RequestPayloadPart(bytes_=close_msg)
@@ -259,24 +278,29 @@ class DeepgramSageMakerConnection:
                 f"[Connection {self.connection_id}] Could not send CloseStream: {e}"
             )
 
-        # Close the input stream - this signals to Deepgram that no more audio is coming
-        try:
-            await self.stream.input_stream.close()
-            logger.debug(f"[Connection {self.connection_id}] Input stream closed, waiting for final responses")
-        except Exception as e:
-            logger.error(f"[Connection {self.connection_id}] Error closing input stream: {e}")
-
-        # Wait for the response processing task to complete naturally
+        # 2. Drain: wait for the response processor to read the server's final
+        #    results and observe the clean close (receive() -> None), with a
+        #    timeout. asyncio.wait (not wait_for) so the task isn't cancelled
+        #    mid-await — awscrt raises InvalidStateError if a future is cancelled
+        #    while its C-level body callback is in flight.
         if self.response_task and not self.response_task.done():
-            try:
-                # Give it up to 15 seconds to finish processing remaining responses
-                await asyncio.wait_for(self.response_task, timeout=15.0)
-                logger.debug(f"[Connection {self.connection_id}] All responses received")
-            except asyncio.TimeoutError:
-                logger.warning(f"[Connection {self.connection_id}] Timeout waiting for final responses (15s elapsed)")
+            done, _ = await asyncio.wait({self.response_task}, timeout=15.0)
+            if not done:
+                logger.warning(f"[Connection {self.connection_id}] Timeout waiting for final responses (15s elapsed); forcing close")
+                self.is_active = False
+                await self._close_input_stream()
                 self.response_task.cancel()
-            except asyncio.CancelledError:
-                pass
+                try:
+                    await self.response_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                logger.info(f"[Connection {self.connection_id}] Session ended (forced) (sent {self.chunk_count} chunks)")
+                return
+            logger.debug(f"[Connection {self.connection_id}] All responses received")
+
+        # 3. Server already closed the output stream; close our input as cleanup.
+        self.is_active = False
+        await self._close_input_stream()
 
         logger.info(f"[Connection {self.connection_id}] Session ended successfully (sent {self.chunk_count} chunks)")
 
@@ -297,6 +321,7 @@ class MultiConnectionMicrophoneClient:
         self.client = None
         self.connections = []
         self.is_active = False
+        self._ended = False
         self.audio_queue = Queue()
         self.pyaudio_instance = None
         self.audio_stream = None
@@ -487,9 +512,16 @@ class MultiConnectionMicrophoneClient:
         logger.info("Microphone stopped")
 
     async def end_all_sessions(self):
-        """Close all streaming sessions"""
-        if not self.is_active:
+        """Close all streaming sessions.
+
+        Guarded on a dedicated _ended flag (not is_active) because the signal
+        handler / duration cutoff sets is_active=False to stop streaming — using
+        is_active as the guard would make this early-return on the normal exit
+        path and skip the graceful CloseStream + drain on every connection.
+        """
+        if self._ended:
             return
+        self._ended = True
 
         logger.debug("Ending all sessions")
         self.is_active = False

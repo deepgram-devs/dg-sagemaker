@@ -60,6 +60,11 @@ class DeepgramSageMakerMicrophoneClient:
         self.stream = None
         self.output_stream = None
         self.is_active = False
+        # Set by the signal handler / caller to ask streaming to stop. Kept
+        # separate from is_active so the response processor can keep reading
+        # finals during the post-CloseStream drain (see end_session).
+        self.stop_requested = False
+        self._ended = False
         self.response_task = None
         self.audio_queue = Queue()
         self.pyaudio_instance = None
@@ -212,7 +217,7 @@ class DeepgramSageMakerMicrophoneClient:
         chunk_count = 0
 
         try:
-            while self.is_active:
+            while self.is_active and not self.stop_requested:
                 # Check if there's audio data in the queue
                 if not self.audio_queue.empty():
                     audio_chunk = self.audio_queue.get()
@@ -332,19 +337,36 @@ class DeepgramSageMakerMicrophoneClient:
 
         logger.info("Microphone stopped")
 
+    async def _close_input_stream(self):
+        """Close the input (request) stream, logging but not raising on error."""
+        try:
+            await self.stream.input_stream.close()
+        except Exception as e:
+            logger.error(f"Error closing input stream: {e}")
+
     async def end_session(self):
-        """Close the streaming session"""
-        if not self.is_active:
+        """Close the streaming session.
+
+        Well-behaved close ordering (mirrors stt_wav_stress.py): send CloseStream,
+        drain the response stream until the server finalizes the trailing segment
+        and closes it on its own, and ONLY THEN close our input stream. Closing
+        the input stream is rendered to the SageMaker container as a WebSocket
+        Close; doing it immediately after CloseStream races the server's finalize
+        and drops the trailing transcript
+        (https://developers.deepgram.com/docs/close-stream). `is_active` is held
+        True across the drain so `_process_responses` keeps reading finals until
+        the server's clean close.
+        """
+        if self._ended or self.stream is None:
             return
+        self._ended = True
 
         logger.debug("Ending session")
-        self.is_active = False
 
-        # Stop the microphone first
+        # Stop the microphone first so no more audio is captured / sent.
         self.stop_microphone()
 
-        # Send Deepgram CloseStream so the server flushes the final transcript
-        # before closing (https://developers.deepgram.com/docs/close-stream).
+        # 1. Send CloseStream so the server flushes the final transcript.
         try:
             close_msg = json.dumps({"type": "CloseStream"}).encode("utf-8")
             payload = RequestPayloadPart(bytes_=close_msg)
@@ -353,21 +375,29 @@ class DeepgramSageMakerMicrophoneClient:
         except Exception as e:
             logger.warning(f"Could not send CloseStream: {e}")
 
-        # Close the input stream - this signals to Deepgram that no more audio is coming
-        await self.stream.input_stream.close()
-        logger.debug("Input stream closed, waiting for final responses")
-
-        # Wait for the response processing task to complete naturally
+        # 2. Drain: wait for the response processor to read the server's final
+        #    results and observe the clean close (receive() -> None), with a
+        #    timeout. Use asyncio.wait (not wait_for) so the task isn't cancelled
+        #    mid-await — awscrt raises InvalidStateError if a future is cancelled
+        #    while its C-level body callback is in flight.
         if self.response_task and not self.response_task.done():
-            try:
-                # Give it up to 15 seconds to finish processing remaining responses
-                await asyncio.wait_for(self.response_task, timeout=15.0)
-                logger.debug("All responses received")
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for final responses (15s elapsed)")
+            done, _ = await asyncio.wait({self.response_task}, timeout=15.0)
+            if not done:
+                logger.warning("Timeout waiting for final responses (15s elapsed); forcing close")
+                self.is_active = False
+                await self._close_input_stream()
                 self.response_task.cancel()
-            except asyncio.CancelledError:
-                pass
+                try:
+                    await self.response_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                logger.info("Session ended (forced after timeout)")
+                return
+            logger.debug("All responses received")
+
+        # 3. Server already closed the output stream; close our input as cleanup.
+        self.is_active = False
+        await self._close_input_stream()
 
         logger.info("Session ended successfully")
 
@@ -439,10 +469,12 @@ async def main():
         region=args.region
     )
 
-    # Handle Ctrl+C gracefully
+    # Handle Ctrl+C gracefully. Set stop_requested (not is_active) so the
+    # streaming loop stops while end_session can still drain final responses
+    # before closing the input stream.
     def signal_handler(sig, frame):
         print("\n\nReceived interrupt signal, stopping...")
-        client.is_active = False
+        client.stop_requested = True
 
     signal.signal(signal.SIGINT, signal_handler)
 
