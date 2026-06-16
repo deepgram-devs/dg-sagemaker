@@ -73,6 +73,7 @@ class DeepgramSageMakerTTSConnection:
         self.output_stream = None
         self.is_active = False
         self.close_sent = False
+        self._ended = False
         self.response_task = None
         self.audio_buffer = Queue()
         self.bytes_received = 0
@@ -81,6 +82,10 @@ class DeepgramSageMakerTTSConnection:
         self._flushed_event = asyncio.Event()
         self._flushed_event.set()
         self._last_flush_time = 0.0
+        # Set initially so wait_for_cleared() returns immediately when no Clear
+        # (barge-in) is in flight.
+        self._cleared_event = asyncio.Event()
+        self._cleared_event.set()
 
         # --- Structured per-connection telemetry (for --summary-jsonl + e2e) ---
         self.encoding = "linear16"        # captured from start_session kwargs
@@ -282,6 +287,63 @@ class DeepgramSageMakerTTSConnection:
             self.is_active = False
             return False
 
+    async def send_clear(self):
+        """
+        Send a Clear message to reset the server's text buffer and halt audio
+        for buffered text — models a human interruption / barge-in
+        (https://developers.deepgram.com/docs/tts-ws-clear).
+
+        Clears the cleared-event before sending so wait_for_cleared() blocks
+        until the server acknowledges with a Cleared response. Also unblocks any
+        pending Flush waiter, since Clear supersedes the in-flight flush's audio.
+
+        Returns:
+            True if sent successfully, False otherwise
+        """
+        if not self.is_active or self.close_sent:
+            return False
+        # Clear supersedes any in-flight Flush's audio — unblock a waiter so the
+        # send loop doesn't stall on a Flushed the server may now skip.
+        self._flushed_event.set()
+        self._cleared_event.clear()
+        try:
+            message = {"type": "Clear"}
+            message_bytes = json.dumps(message).encode('utf-8')
+            payload = RequestPayloadPart(bytes_=message_bytes, data_type="UTF8")
+            event = RequestStreamEventPayloadPart(value=payload)
+            await self.stream.input_stream.send(event)
+            logger.info(f"[Connection {self.connection_id}] Sent Clear (barge-in)")
+            return True
+        except Exception as e:
+            logger.error(f"[Connection {self.connection_id}] Error sending Clear: {e}")
+            self.is_active = False
+            self._cleared_event.set()  # Unblock any waiters
+            return False
+
+    async def wait_for_cleared(self, timeout: float = 15.0) -> bool:
+        """
+        Block until the server acknowledges the last Clear with a Cleared message.
+
+        Returns immediately if the connection is inactive or no Clear is in
+        flight. On timeout, records a warning (does NOT fail the connection) so a
+        bundle that silently ignores Clear surfaces as cleared_count=0 rather
+        than a hard error.
+
+        Returns:
+            True if Cleared was received (or none outstanding), False on timeout.
+        """
+        if not self.is_active:
+            return True
+        try:
+            await asyncio.wait_for(self._cleared_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            msg = f"Cleared-ack timeout: no Cleared within {timeout}s after Clear"
+            logger.warning(f"[Connection {self.connection_id}] {msg}")
+            self.warnings.append(msg)
+            self._cleared_event.set()
+            return False
+
     def _log_exception_details(self, exc: Exception):
         """
         Walk the full exception chain and print every piece of structured detail
@@ -409,6 +471,7 @@ class DeepgramSageMakerTTSConnection:
 
             elif message_type == "Cleared":
                 self.cleared_count += 1
+                self._cleared_event.set()
                 logger.debug(
                     f"[Connection {self.connection_id}] Cleared "
                     f"(sequence_id={message.get('sequence_id')})"
@@ -558,19 +621,8 @@ class DeepgramSageMakerTTSConnection:
             "first_audio_latency_s": _delta(self.session_start_at, self.first_audio_at),
         }
 
-    async def end_session(self, force=False):
-        """Close the streaming session
-
-        Args:
-            force: If True, cancel response task immediately without waiting for remaining audio
-        """
-        already_inactive = not self.is_active
-        self.is_active = False
-        self._flushed_event.set()  # Unblock any send loop waiting on wait_for_flushed()
-
-        logger.debug(f"[Connection {self.connection_id}] Ending session (force={force})")
-
-        # Close the input stream - this signals to Deepgram that no more text is coming
+    async def _close_input_stream(self):
+        """Close the input (request) stream, logging but not raising on error."""
         try:
             if self.stream and self.stream.input_stream:
                 await self.stream.input_stream.close()  # type: ignore
@@ -578,26 +630,73 @@ class DeepgramSageMakerTTSConnection:
         except Exception as e:
             logger.debug(f"[Connection {self.connection_id}] Input stream close (may already be closed): {e}")
 
-        # Wait for the response processing task to complete
-        if self.response_task and not self.response_task.done():
-            if force or already_inactive:
-                # Shutdown requested — cancel immediately rather than waiting
+    async def end_session(self, force=False):
+        """Close the streaming session.
+
+        Well-behaved close ordering (mirrors stt_wav_stress.py): send the
+        Deepgram TTS Close control message, drain the response stream until the
+        server has sent the remaining audio and closed it on its own, and ONLY
+        THEN close our input stream. Closing the input stream is rendered to the
+        SageMaker container as a WebSocket Close; doing it before the drain
+        races the server and can clip trailing audio
+        (https://developers.deepgram.com/docs/tts-ws-close). is_active is held
+        True across the drain so _process_audio_responses keeps reading until the
+        clean close.
+
+        Args:
+            force: If True, cancel the response task immediately without draining
+                (used on Ctrl+C / hard shutdown).
+        """
+        if self._ended:
+            return
+        self._ended = True
+
+        already_inactive = not self.is_active
+        self._flushed_event.set()  # Unblock any send loop waiting on wait_for_flushed()
+
+        logger.debug(f"[Connection {self.connection_id}] Ending session (force={force})")
+
+        # Force / already-dead path: cancel immediately, then close input.
+        if force or already_inactive:
+            self.is_active = False
+            if self.response_task and not self.response_task.done():
                 self.response_task.cancel()
                 try:
                     await asyncio.wait_for(self.response_task, timeout=1.0)
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
-            else:
+            await self._close_input_stream()
+            logger.info(f"[Connection {self.connection_id}] Session ended (forced) ({self.phrase_count} phrases, {self.bytes_received} bytes)")
+            return
+
+        # 1. Send the Close control message so the server finishes the remaining
+        #    audio and closes the WebSocket.
+        await self.send_close_message()
+
+        # 2. Drain: wait for the response processor to read the remaining audio
+        #    and observe the server's close (receive() -> None), with a timeout.
+        #    asyncio.wait (not wait_for) so the task isn't cancelled mid-await —
+        #    awscrt raises InvalidStateError if a future is cancelled while its
+        #    C-level body callback is in flight. TTS can take longer than STT
+        #    since it must synthesize all buffered text.
+        if self.response_task and not self.response_task.done():
+            done, _ = await asyncio.wait({self.response_task}, timeout=30.0)
+            if not done:
+                logger.warning(f"[Connection {self.connection_id}] Timeout waiting for final audio (30s); forcing close")
+                self.is_active = False
+                await self._close_input_stream()
+                self.response_task.cancel()
                 try:
-                    # Give it up to 30 seconds to finish processing remaining audio
-                    # TTS can take longer than STT as it needs to synthesize all the text
-                    await asyncio.wait_for(self.response_task, timeout=30.0)
-                    logger.debug(f"[Connection {self.connection_id}] All audio received")
-                except asyncio.TimeoutError:
-                    logger.warning(f"[Connection {self.connection_id}] Timeout waiting for final audio (30s elapsed)")
-                    self.response_task.cancel()
-                except asyncio.CancelledError:
+                    await self.response_task
+                except (asyncio.CancelledError, Exception):
                     pass
+                logger.info(f"[Connection {self.connection_id}] Session ended (forced after timeout) ({self.phrase_count} phrases, {self.bytes_received} bytes)")
+                return
+            logger.debug(f"[Connection {self.connection_id}] All audio received")
+
+        # 3. Server closed the output stream; close our input as cleanup.
+        self.is_active = False
+        await self._close_input_stream()
 
         logger.info(f"[Connection {self.connection_id}] Session ended ({self.phrase_count} phrases, {self.bytes_received} bytes)")
 
@@ -791,7 +890,8 @@ class MultiConnectionTTSClient:
 
         logger.info("Audio playback closed")
 
-    async def stream_text_and_playback_audio(self, duration_seconds, phrases, max_phrases=None):
+    async def stream_text_and_playback_audio(self, duration_seconds, phrases, max_phrases=None,
+                                             barge_in_after_s=None):
         """
         Stream text to all connections and playback audio from the selected connection
 
@@ -801,6 +901,9 @@ class MultiConnectionTTSClient:
             max_phrases: If set, send exactly this many phrases (each phrase once
                 when == len(phrases)) then stop — deterministic mode for the e2e
                 drivers. ``None`` cycles phrases for the full duration.
+            barge_in_after_s: If set, after this many seconds of streaming send a
+                Clear control message to all active connections once (modelling a
+                human interruption) and confirm the Cleared ack, then continue.
         """
         has_playback = 1 <= self.playback_connection_id <= self.num_connections
         if has_playback:
@@ -811,10 +914,11 @@ class MultiConnectionTTSClient:
         start_time = None  # Set when first audio chunk is played
         phrase_index = 0
         send_loop_done = False
+        barge_in_done = False
 
         async def send_text_loop():
             """Continuously send text to all connections for the specified duration"""
-            nonlocal phrase_index, send_loop_done
+            nonlocal phrase_index, send_loop_done, barge_in_done
             try:
                 while self.is_active:
                     # Check if duration has elapsed since first audio playback
@@ -828,6 +932,23 @@ class MultiConnectionTTSClient:
                     if not active_connections:
                         logger.error("All connections have failed, stopping text generation")
                         break
+
+                    # One-shot barge-in: model a human interruption mid-stream by
+                    # sending Clear to all active connections and confirming the
+                    # Cleared ack (https://developers.deepgram.com/docs/tts-ws-clear),
+                    # then resume sending.
+                    if (barge_in_after_s is not None and not barge_in_done
+                            and start_time is not None
+                            and time.time() - start_time >= barge_in_after_s):
+                        barge_in_done = True
+                        clearable = [c for c in active_connections if not c.close_sent]
+                        if clearable:
+                            logger.info(
+                                f"Barge-in after {barge_in_after_s:.1f}s: sending Clear "
+                                f"to {len(clearable)} connection(s)"
+                            )
+                            await asyncio.gather(*[c.send_clear() for c in clearable])
+                            await asyncio.gather(*[c.wait_for_cleared() for c in clearable])
 
                     # Wait for every active connection to acknowledge the previous Flush
                     # before sending the next phrase. This keeps the pipeline in sync and
@@ -1005,6 +1126,16 @@ async def main():
              "Required when pyaudio/PortAudio is unavailable (CI / e2e)."
     )
     parser.add_argument(
+        "--barge-in-after-s",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Model a human interruption: after N seconds of streaming, send a "
+             "Clear control message to all connections and confirm the Cleared ack "
+             "(https://developers.deepgram.com/docs/tts-ws-clear), then resume. "
+             "Off by default."
+    )
+    parser.add_argument(
         "--extra",
         default="",
         metavar="k=v&k2=v2",
@@ -1180,7 +1311,10 @@ async def main():
 
         # Stream text and playback audio
         streaming_task = asyncio.create_task(
-            client.stream_text_and_playback_audio(args.duration, phrases, max_phrases=max_phrases)
+            client.stream_text_and_playback_audio(
+                args.duration, phrases, max_phrases=max_phrases,
+                barge_in_after_s=args.barge_in_after_s,
+            )
         )
         await streaming_task
 

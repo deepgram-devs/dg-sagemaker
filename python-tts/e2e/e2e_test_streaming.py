@@ -87,6 +87,10 @@ class TTSStreamScenario:
     multi_phrase: bool = False
     check_rms: bool = True
     min_flushed: int = 1
+    # Send a mid-stream Clear (barge-in) after N seconds, then require ≥
+    # `min_cleared` Cleared acks per connection.
+    barge_in_after_s: float | None = None
+    min_cleared: int = 0
     tolerated_error_substring: str | None = None
     notes: str = ""
 
@@ -116,6 +120,15 @@ def default_scenarios(language: str, voice_coverage_n: int = 3) -> list[TTSStrea
             multi_phrase=True,
             min_flushed=2,  # ≥2 guaranteed pre-close; the 3rd ack lands in the drain
             notes="exercises the Speak→Flush→Flushed loop across phrases",
+        ),
+        TTSStreamScenario(
+            name="barge_in_clear",
+            description="mid-stream Clear (barge-in) — Cleared ack confirmed",
+            multi_phrase=True,
+            barge_in_after_s=2.0,
+            min_cleared=1,
+            check_rms=False,  # Clear cancels buffered audio; RMS not the signal here
+            notes="exercises the Clear→Cleared round-trip (interruption)",
         ),
         TTSStreamScenario(
             name="encoding_linear16_24k",
@@ -193,6 +206,7 @@ def _stress_cmd(
     text_file: Path,
     extra: dict[str, str],
     skip_verify: bool = False,
+    barge_in_after_s: float | None = None,
 ) -> list[str]:
     cmd = [
         "uv", "run", "--project", str(script.parent),
@@ -209,6 +223,8 @@ def _stress_cmd(
     ]
     if skip_verify:
         cmd.append("--skip-verify")
+    if barge_in_after_s is not None:
+        cmd += ["--barge-in-after-s", str(barge_in_after_s)]
     if extra:
         cmd += ["--extra", "&".join(f"{k}={v}" for k, v in extra.items())]
     return cmd
@@ -237,6 +253,7 @@ def run_scenario(
         stress_script, endpoint, region, eff_voice,
         scenario.connections, summary_path, text_file, scenario.extra,
         skip_verify=skip_verify,
+        barge_in_after_s=scenario.barge_in_after_s,
     )
     logger.info(f"[{scenario.name}] running: {' '.join(cmd)}")
 
@@ -274,6 +291,7 @@ def run_scenario(
     min_conn_bytes = min((r.get("audio_bytes", 0) for r in rows), default=0)
     total_flushed = sum(r.get("flushed_count", 0) for r in rows)
     min_conn_flushed = min((r.get("flushed_count", 0) for r in rows), default=0)
+    min_conn_cleared = min((r.get("cleared_count", 0) for r in rows), default=0)
     rms_values = [r.get("audio_rms") for r in rows if r.get("audio_rms") is not None]
     first = rows[0]
 
@@ -292,6 +310,13 @@ def run_scenario(
         checks.append(flush_ok)
         if not flush_ok:
             notes.append(f"FLUSHED<{scenario.min_flushed}")
+
+    if scenario.min_cleared:
+        cleared_ok = min_conn_cleared >= scenario.min_cleared
+        checks.append(cleared_ok)
+        notes.append(f"cleared(min)={min_conn_cleared}")
+        if not cleared_ok:
+            notes.append(f"CLEARED<{scenario.min_cleared}")
 
     rms_val = None
     if scenario.check_rms:
