@@ -140,7 +140,12 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
           nova-3 streaming AND batch per
           https://developers.deepgram.com/docs/search
       Not supported on nova-3 streaming (per docs; excluded here):
-        - filler_words (pre-recorded only on nova-3)
+        - filler_words (pre-recorded only on nova-3; also note
+          filler_words is only available on the Nova, Nova-2, and
+          Nova-3 *general* models — NOT on specialized models such as
+          nova-3-medical, so this feature is N/A for those models
+          regardless of streaming vs pre-recorded; see
+          https://developers.deepgram.com/docs/filler-words)
         - utterances (pre-recorded only on nova-3; see
           https://developers.deepgram.com/docs/utterances)
         - paragraphs (pre-recorded only)

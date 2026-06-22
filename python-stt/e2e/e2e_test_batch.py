@@ -130,6 +130,11 @@ def default_scenarios(mode: str) -> list[BatchScenario]:
         diarize (v1), diarize_model=v2, keyterm, replace (find/replace),
         filler_words, utterances, utt_split, paragraphs,
         profanity_filter, search
+        NB. filler_words is only available on the Nova, Nova-2, and
+        Nova-3 *general* models — NOT on specialized models such as
+        nova-3-medical, so the filler_words scenario is N/A for those
+        models even on pre-recorded; see
+        https://developers.deepgram.com/docs/filler-words
       Bundle-component dependent (Wilhelmina families that EXIST but
       are not yet added to FEATURE_COMPONENTS for batch — these
       scenarios will FAIL on the current MP bundles until we add them):
