@@ -50,6 +50,7 @@ import awscrt.io as crt_io
 # Configuration constants
 DEFAULT_REGION = "us-east-2"
 CHUNK_SIZE = 8192  # Bytes per audio chunk (stream mode)
+KEEP_ALIVE_INTERVAL_SECONDS = 5.0
 
 # SageMaker InvokeEndpoint body limit (bytes)
 INVOKE_ENDPOINT_MAX_BYTES = 26_214_400  # 25 MB
@@ -126,6 +127,8 @@ class DeepgramSageMakerConnection:
         self.output_stream = None
         self.is_active = False
         self.response_task = None
+        self.keep_alive_task = None
+        self._send_lock = asyncio.Lock()
         self.chunk_count = 0
         self.byte_count = 0
         self.transcript_count = 0
@@ -198,27 +201,78 @@ class DeepgramSageMakerConnection:
             model_query_string=query_string
         )
 
-        self.stream = await asyncio.wait_for(
-            self.client.invoke_endpoint_with_bidirectional_stream(stream_input),
-            timeout=30,
-        )
-        self.is_active = True
-        self.session_start_at = time.monotonic()
+        try:
+            self.stream = await asyncio.wait_for(
+                self.client.invoke_endpoint_with_bidirectional_stream(stream_input),
+                timeout=30,
+            )
+            self.is_active = True
+            self.session_start_at = time.monotonic()
 
-        output = await asyncio.wait_for(self.stream.await_output(), timeout=30)
-        self.output_stream = output[1]
+            output = await asyncio.wait_for(self.stream.await_output(), timeout=30)
+            self.output_stream = output[1]
 
-        self.response_task = asyncio.create_task(self._process_responses())
-        logger.info(f"[Connection {self.connection_id}] Session started")
+            self.response_task = asyncio.create_task(self._process_responses())
+            self.keep_alive_task = asyncio.create_task(self._send_keep_alives())
+            logger.info(f"[Connection {self.connection_id}] Session started")
+        except Exception:
+            self.is_active = False
+            if self.stream:
+                try:
+                    await self.stream.input_stream.close()
+                    self._input_closed = True
+                except Exception:
+                    pass
+            raise
+
+    async def _send_payload_bytes(self, payload_bytes: bytes, *, require_active=True):
+        """Send one SageMaker event-stream payload, serialized per connection."""
+        if require_active and not self.is_active:
+            return False
+        if self._input_closed:
+            return False
+        payload = RequestPayloadPart(bytes_=payload_bytes)
+        event = RequestStreamEventPayloadPart(value=payload)
+        async with self._send_lock:
+            await self.stream.input_stream.send(event)
+        return True
+
+    async def _send_control_message(self, message_type: str, *, require_active=True):
+        """Send a Deepgram-compatible JSON control message."""
+        message = json.dumps({"type": message_type}).encode("utf-8")
+        return await self._send_payload_bytes(message, require_active=require_active)
+
+    async def _send_keep_alives(self):
+        """Send Deepgram KeepAlive control messages while the stream is open."""
+        try:
+            while self.is_active:
+                await asyncio.sleep(KEEP_ALIVE_INTERVAL_SECONDS)
+                if not self.is_active:
+                    break
+                sent = await self._send_control_message("KeepAlive")
+                if sent:
+                    logger.debug(
+                        f"[Connection {self.connection_id}] Sent KeepAlive"
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if not self.is_active:
+                return
+            msg = str(e)
+            logger.error(
+                f"[Connection {self.connection_id}] Error sending KeepAlive: {msg}"
+            )
+            self.errored = True
+            self.error_messages.append(msg)
+            self.is_active = False
 
     async def send_audio_chunk(self, audio_bytes):
         """Send a chunk of audio data to the stream."""
         if not self.is_active:
             return
         try:
-            payload = RequestPayloadPart(bytes_=audio_bytes)
-            event = RequestStreamEventPayloadPart(value=payload)
-            await self.stream.input_stream.send(event)
+            await self._send_payload_bytes(audio_bytes)
             self.chunk_count += 1
             self.byte_count += len(audio_bytes)
             logger.debug(
@@ -261,10 +315,10 @@ class DeepgramSageMakerConnection:
             return
         self._close_stream_sent = True
         try:
-            close_msg = json.dumps({"type": "CloseStream"}).encode("utf-8")
-            payload = RequestPayloadPart(bytes_=close_msg)
-            event = RequestStreamEventPayloadPart(value=payload)
-            await asyncio.wait_for(self.stream.input_stream.send(event), timeout=timeout)
+            await asyncio.wait_for(
+                self._send_control_message("CloseStream", require_active=False),
+                timeout=timeout,
+            )
         except Exception as e:
             logger.warning(
                 f"[Connection {self.connection_id}] Could not send CloseStream: {e}"
@@ -316,6 +370,11 @@ class DeepgramSageMakerConnection:
             msg = _unwrap_streaming_error(e)
             self.close_observed_at = time.monotonic()
             self.close_reason = f"exception: {type(e).__name__}: {msg}"
+            if "Input stream broken" in msg and (self._close_stream_sent or self._input_closed):
+                logger.info(
+                    f"[Connection {self.connection_id}] Stream closed after client shutdown: {msg}"
+                )
+                return
             logger.error(
                 f"[Connection {self.connection_id}] Error in response processor "
                 f"(dg_request_id={self.dg_request_id}, "
@@ -456,6 +515,13 @@ class DeepgramSageMakerConnection:
         end_session runs, so no further audio is sent meanwhile.
         """
         logger.debug(f"[Connection {self.connection_id}] Ending session")
+
+        if self.keep_alive_task and not self.keep_alive_task.done():
+            self.keep_alive_task.cancel()
+            try:
+                await self.keep_alive_task
+            except asyncio.CancelledError:
+                pass
 
         if self.use_close_stream:
             # Idempotent: the EOF path normally already sent CloseStream; this

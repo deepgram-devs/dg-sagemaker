@@ -135,6 +135,11 @@ Supports two sub-commands: `stream` and `batch`.
 
 Streams the WAV file to Deepgram on SageMaker in real-time, paced to match the file's actual sample rate. Behaves like a live microphone source, enabling repeatable and automated load testing without requiring a physical microphone.
 
+While each streaming connection is open, the client sends a Deepgram-compatible
+`{"type":"KeepAlive"}` control message every 5 seconds. At shutdown it sends
+`{"type":"CloseStream"}` so the endpoint can flush final transcripts before the
+input stream is closed.
+
 #### Examples
 
 **Basic usage (single connection, play file once):**
