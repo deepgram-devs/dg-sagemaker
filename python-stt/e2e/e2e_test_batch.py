@@ -67,6 +67,7 @@ from e2e_test_common import (
     download_sample,
     expected_text_for_loops,
     fmt_wer,
+    language_supported,
     multiply_wav,
     print_summary_table,
     validate_pcm16,
@@ -113,6 +114,11 @@ class BatchScenario:
     # falsely PASS if the request were silently served). Used to verify the
     # reject-unknown-params gate (a request with an off-allowlist param → 400).
     expect_error_substring: str | None = None
+    # None = no restriction (default). Set ONLY when the endpoint hard-rejects
+    # (a real error, not a graceful warning/no-op) outside this language set —
+    # see `language_supported()` in e2e_test_common for the exact semantics
+    # and why most "English only" docs badges do NOT belong here.
+    supported_languages: list[str] | None = None
     notes: str = ""
 
 
@@ -309,7 +315,7 @@ def _all_scenarios() -> list[BatchScenario]:
         ),
         BatchScenario(
             name="sync_25s_summarize",
-            description="sync + summarize=v2 (requires fathom)",
+            description="sync + summarize=v2 (English only — hard 400 otherwise)",
             transport="sync",
             custom_params={"summarize": "v2"},
             wer_threshold=1.0,
@@ -317,7 +323,13 @@ def _all_scenarios() -> list[BatchScenario]:
             presence_in_full_response=True,
             presence_check="summary",
             tolerated_error_substring="summarize",
-            notes="English only; fathom required",
+            supported_languages=["en"],
+            notes=(
+                "confirmed 2026-07-14: stem hard-rejects with 400 "
+                '"Summarization v2 not supported for non-English languages" '
+                "for any non-English/multi request, regardless of bundle "
+                "content — auto-skipped outside --language en"
+            ),
         ),
         BatchScenario(
             name="sync_25s_topics",
@@ -396,7 +408,7 @@ def _all_scenarios() -> list[BatchScenario]:
         ),
         BatchScenario(
             name="async_15min_summarize",
-            description="async + summarize=v2 (requires fathom)",
+            description="async + summarize=v2 (English only — hard 400 otherwise)",
             transport="async",
             use_long_form=True,
             custom_params={"summarize": "v2"},
@@ -405,6 +417,13 @@ def _all_scenarios() -> list[BatchScenario]:
             presence_in_full_response=True,
             presence_check="summary",
             tolerated_error_substring="summarize",
+            supported_languages=["en"],
+            notes=(
+                "confirmed 2026-07-14: stem hard-rejects with 400 "
+                '"Summarization v2 not supported for non-English languages" '
+                "for any non-English/multi request, regardless of bundle "
+                "content — auto-skipped outside --language en"
+            ),
         ),
         BatchScenario(
             name="async_15min_redact_name",
@@ -996,8 +1015,9 @@ def main() -> int:
         )
         print("Available scenarios:")
         for s in scenarios:
+            langs = f"  langs={s.supported_languages}" if s.supported_languages else ""
             print(f"  {s.name:<28} [{s.transport}]  {s.description}  "
-                  f"(threshold={fmt_wer(s.wer_threshold)})")
+                  f"(threshold={fmt_wer(s.wer_threshold)}){langs}")
         return 0
 
     if not args.mode:
@@ -1069,7 +1089,8 @@ def main() -> int:
     download_sample(short_wav, force=args.force_download)
     sr, ch, dur = validate_pcm16(short_wav)
     print(f"Sample:      {short_wav.name}  {sr} Hz  {ch}ch  {dur:.2f}s")
-    if any(s.use_long_form for s in scenarios):
+    runnable = [s for s in scenarios if language_supported(s.supported_languages, args.language)]
+    if any(s.use_long_form for s in runnable):
         if not long_wav.exists() or args.force_download:
             loops = multiply_wav(short_wav, long_wav, args.target_long_form_s)
         else:
@@ -1085,6 +1106,16 @@ def main() -> int:
     rows: list[dict] = []
     for scenario in scenarios:
         print(f"--> {scenario.name}  [{scenario.transport}]  ({scenario.description})")
+        if not language_supported(scenario.supported_languages, args.language):
+            reason = (f"language not supported: scenario supports "
+                      f"{scenario.supported_languages}, run --language={args.language!r}")
+            print(f"    SKIP  {reason}")
+            rows.append({
+                "scenario": scenario.name, "ok": True, "skipped": True,
+                "wer": None, "sdi": (0, 0, 0), "words": 0, "elapsed_s": 0.0,
+                "notes": f"SKIPPED ({reason})",
+            })
+            continue
         if scenario.transport == "sync":
             row = run_sync_scenario(
                 scenario,
@@ -1114,8 +1145,9 @@ def main() -> int:
                 poll_interval_s=args.poll_interval_s,
             )
         rows.append(row)
-        flag = "PASS" if row["ok"] else "FAIL"
-        print(f"    {flag}  WER={fmt_wer(row['wer'])}  elapsed={row['elapsed_s']:.1f}s  {row['notes']}")
+        flag = "SKIP" if row.get("skipped") else ("PASS" if row["ok"] else "FAIL")
+        wer_str = "-" if row.get("skipped") else fmt_wer(row["wer"])
+        print(f"    {flag}  WER={wer_str}  elapsed={row['elapsed_s']:.1f}s  {row['notes']}")
 
     print()
     passed, failed = print_summary_table(rows, wer_threshold=args.wer_threshold)

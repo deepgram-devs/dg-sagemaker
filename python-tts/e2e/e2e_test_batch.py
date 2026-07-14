@@ -65,6 +65,7 @@ from e2e_test_common import (
     alt_language_voice,
     default_voice,
     featured_voices,
+    language_supported,
     linear16_duration_and_rms,
     parse_wav,
     print_summary_table,
@@ -113,6 +114,10 @@ class TTSScenario:
     speed_compare: bool = False
     expect_failure: bool = False
     tolerated_error_substring: str | None = None
+    # None = no restriction (default). Set ONLY when the endpoint hard-rejects
+    # outside this language set — see `language_supported()` in
+    # e2e_test_common.
+    supported_languages: list[str] | None = None
     notes: str = ""
 
 
@@ -295,17 +300,19 @@ def default_scenarios(language: str, voice_coverage_n: int = 3) -> list[TTSScena
         ))
 
     # Aura-1 legacy voice check is only meaningful for English bundles (Aura-1
-    # is English-only). Other languages skip it.
-    if language == "en":
-        scenarios.append(TTSScenario(
-            name="voice_aura1_asteria",
-            description="model=aura-asteria-en (legacy Aura-1 default voice)",
-            voice="aura-asteria-en",
-            params={"encoding": "linear16", "container": "wav"},
-            check_rms=True,
-            tolerated_error_substring="model",
-            notes="PASS-WITH-NOTE if Aura-1 isn't bundled with this Aura-2 deploy",
-        ))
+    # is English-only) — always included so a non-English run shows a visible
+    # SKIP row (see `language_supported` in e2e_test_common) instead of the
+    # scenario silently not existing in the list.
+    scenarios.append(TTSScenario(
+        name="voice_aura1_asteria",
+        description="model=aura-asteria-en (legacy Aura-1 default voice)",
+        voice="aura-asteria-en",
+        params={"encoding": "linear16", "container": "wav"},
+        check_rms=True,
+        tolerated_error_substring="model",
+        supported_languages=["en"],
+        notes="PASS-WITH-NOTE if Aura-1 isn't bundled with this Aura-2 deploy",
+    ))
 
     return scenarios
 
@@ -689,7 +696,8 @@ def main() -> int:
         print(f"Available scenarios (shown for language={DEFAULT_LANGUAGE!r}; "
               f"voice rows are per-language):")
         for s in scenarios:
-            print(f"  {s.name:<32} {s.description}")
+            langs = f"  langs={s.supported_languages}" if s.supported_languages else ""
+            print(f"  {s.name:<32} {s.description}{langs}")
         return 0
 
     if not args.endpoint_name:
@@ -756,6 +764,15 @@ def main() -> int:
     rows: list[dict] = []
     for scenario in scenarios:
         print(f"--> {scenario.name}  ({scenario.description})")
+        if not language_supported(scenario.supported_languages, language):
+            reason = (f"language not supported: scenario supports "
+                      f"{scenario.supported_languages}, run language={language!r}")
+            print(f"    SKIP  {reason}")
+            rows.append({
+                "scenario": scenario.name, "ok": True, "skipped": True,
+                "elapsed_s": 0.0, "notes": f"SKIPPED ({reason})",
+            })
+            continue
         row = run_scenario(
             scenario,
             session=session,
@@ -767,7 +784,7 @@ def main() -> int:
             async_ctx=async_ctx,
         )
         rows.append(row)
-        flag = "PASS" if row["ok"] else "FAIL"
+        flag = "SKIP" if row.get("skipped") else ("PASS" if row["ok"] else "FAIL")
         print(f"    {flag}  elapsed={row['elapsed_s']:.1f}s  {row['notes']}")
 
     print()

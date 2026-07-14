@@ -396,11 +396,39 @@ def linear16_duration_and_rms(data: bytes, requested_sample_rate: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Language-restricted scenarios
+# ---------------------------------------------------------------------------
+
+def language_supported(supported: list[str] | None, run_language: str) -> bool:
+    """Does a scenario declaring `supported` (its `supported_languages` field)
+    support the endpoint's configured `run_language`?
+
+    `supported is None` means "no restriction" (every scenario's default) —
+    only set `supported_languages` on a scenario when there's DIRECT evidence
+    the endpoint hard-rejects the request outside that language set. Mirrors
+    the STT drivers' `e2e_test_common.language_supported` (each family's e2e/
+    tree is a standalone package with its own common module, so this is
+    duplicated rather than shared — keep both in sync if the semantics change).
+
+    `run_language` matches an entry if exact, or if its base subtag matches
+    (`en-US` matches an entry of `en`).
+    """
+    if supported is None:
+        return True
+    run = run_language.lower()
+    return any(run == e.lower() or run.split("-")[0] == e.lower() for e in supported)
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
 def print_summary_table(rows: list[dict]) -> tuple[int, int]:
-    """Render the per-scenario TTS summary table. Returns (pass_count, fail_count)."""
+    """Render the per-scenario TTS summary table. Returns (pass_count, fail_count).
+
+    A row with `"skipped": True` prints as SKIP and counts toward neither
+    passed nor failed (see `language_supported` above).
+    """
     if not rows:
         print("(no scenarios ran)")
         return 0, 0
@@ -419,16 +447,20 @@ def print_summary_table(rows: list[dict]) -> tuple[int, int]:
     print(header)
     print("-" * len(header))
 
-    passed = failed = 0
+    passed = failed = skipped = 0
     for r in rows:
+        is_skip = bool(r.get("skipped"))
         ok = bool(r.get("ok"))
-        passed += ok
-        failed += (not ok)
+        if is_skip:
+            skipped += 1
+        else:
+            passed += ok
+            failed += (not ok)
         cells = []
         for _, w, key in cols:
             v = r.get(key, "")
             if key == "ok":
-                v = "PASS" if ok else "FAIL"
+                v = "SKIP" if is_skip else ("PASS" if ok else "FAIL")
             elif key == "elapsed_s" and isinstance(v, (int, float)):
                 v = f"{v:.2f}s"
             elif key == "duration_s" and isinstance(v, (int, float)):
@@ -440,5 +472,5 @@ def print_summary_table(rows: list[dict]) -> tuple[int, int]:
             cells.append(f"{v:<{w}}")
         print("  ".join(cells))
     print("=" * len(header))
-    print(f"PASSED: {passed}  FAILED: {failed}  TOTAL: {len(rows)}")
+    print(f"PASSED: {passed}  FAILED: {failed}  SKIPPED: {skipped}  TOTAL: {len(rows)}")
     return passed, failed

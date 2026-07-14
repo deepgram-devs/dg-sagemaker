@@ -53,6 +53,7 @@ from e2e_test_common import (
     alt_language_voice,
     default_voice,
     featured_voices,
+    language_supported,
     print_summary_table,
     reference_phrases,
     reference_text,
@@ -92,6 +93,11 @@ class TTSStreamScenario:
     barge_in_after_s: float | None = None
     min_cleared: int = 0
     tolerated_error_substring: str | None = None
+    # None = no restriction (default). Set ONLY when the endpoint hard-rejects
+    # outside this language set — see `language_supported()` in
+    # e2e_test_common. No streaming scenario needs this today; field exists
+    # for parity with the batch driver.
+    supported_languages: list[str] | None = None
     notes: str = ""
 
 
@@ -491,6 +497,15 @@ def main() -> int:
     rows: list[dict] = []
     for scenario in scenarios:
         print(f"--> {scenario.name}  ({scenario.description})")
+        if not language_supported(scenario.supported_languages, language):
+            reason = (f"language not supported: scenario supports "
+                      f"{scenario.supported_languages}, run language={language!r}")
+            print(f"    SKIP  {reason}")
+            rows.append({
+                "scenario": scenario.name, "ok": True, "skipped": True,
+                "elapsed_s": 0.0, "notes": f"SKIPPED ({reason})",
+            })
+            continue
         row = run_scenario(
             scenario,
             endpoint=args.endpoint_name,
@@ -504,7 +519,7 @@ def main() -> int:
             skip_verify=args.skip_verify,
         )
         rows.append(row)
-        flag = "PASS" if row["ok"] else "FAIL"
+        flag = "SKIP" if row.get("skipped") else ("PASS" if row["ok"] else "FAIL")
         print(f"    {flag}  elapsed={row['elapsed_s']:.1f}s  {row['notes']}")
 
     print()

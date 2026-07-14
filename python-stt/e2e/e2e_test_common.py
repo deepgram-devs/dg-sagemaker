@@ -238,11 +238,51 @@ def fmt_wer(ratio: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Language-restricted scenarios
+# ---------------------------------------------------------------------------
+
+def language_supported(supported: list[str] | None, run_language: str) -> bool:
+    """Does a scenario declaring `supported` (its `supported_languages` field)
+    support the endpoint's configured `run_language`?
+
+    `supported is None` means "no restriction" (every scenario's default) —
+    only set `supported_languages` on a scenario when there's DIRECT evidence
+    the endpoint hard-rejects the request outside that language set (e.g. a
+    documented `400` with an explicit `"not supported for non-English
+    languages"`-style body). Most "English" badges in the docs describe a
+    feature that degrades gracefully (a `warnings[]` entry, or a silent
+    no-op) rather than a hard reject — those scenarios should stay
+    unrestricted so the graceful-degrade behavior itself keeps getting
+    exercised. See the 2026-07-14 investigation of `summarize=v2` on a
+    `language=multi` batch endpoint: initially assumed to be a bundle-staging
+    gap, actually a hard, permanent `400` ("Summarization v2 not supported
+    for non-English languages") — this predicate exists for exactly that
+    class of scenario, not the softer "English only" cases.
+
+    `run_language` matches an entry if exact, or if its base subtag matches
+    (`en-US` matches an entry of `en`). `multi` only matches if `"multi"` is
+    listed explicitly — a language-restricted scenario running against a
+    language-detect endpoint should be treated as unsupported by default.
+    """
+    if supported is None:
+        return True
+    run = run_language.lower()
+    return any(run == e.lower() or run.split("-")[0] == e.lower() for e in supported)
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
 def print_summary_table(rows: list[dict], wer_threshold: float = 0.05) -> tuple[int, int]:
-    """Render the per-scenario summary table. Returns (pass_count, fail_count)."""
+    """Render the per-scenario summary table. Returns (pass_count, fail_count).
+
+    A row with `"skipped": True` (a scenario whose `supported_languages`
+    excluded the run's `--language`) prints as SKIP and counts toward
+    neither passed nor failed — the return tuple stays a 2-tuple so existing
+    callers (`0 if failed == 0 else 1` exit codes) need no changes; the
+    skipped count is still shown in the footer.
+    """
     if not rows:
         print("(no scenarios ran)")
         return 0, 0
@@ -261,22 +301,26 @@ def print_summary_table(rows: list[dict], wer_threshold: float = 0.05) -> tuple[
     print(header)
     print("-" * len(header))
 
-    passed = failed = 0
+    passed = failed = skipped = 0
     for r in rows:
+        is_skip = bool(r.get("skipped"))
         ok = r.get("ok")
-        if ok is None:
-            ok = r.get("wer", 1.0) <= wer_threshold and not r.get("error")
-        if ok:
-            passed += 1
+        if is_skip:
+            skipped += 1
         else:
-            failed += 1
+            if ok is None:
+                ok = r.get("wer", 1.0) <= wer_threshold and not r.get("error")
+            if ok:
+                passed += 1
+            else:
+                failed += 1
         cells = []
         for _, w, key in cols:
             v = r.get(key, "")
             if key == "ok":
-                v = "PASS" if ok else "FAIL"
+                v = "SKIP" if is_skip else ("PASS" if ok else "FAIL")
             elif key == "wer" and isinstance(v, (float, int)):
-                v = fmt_wer(v)
+                v = "-" if is_skip else fmt_wer(v)
             elif key == "elapsed_s" and isinstance(v, (float, int)):
                 v = f"{v:.2f}s"
             elif key == "sdi" and isinstance(v, tuple) and len(v) == 3:
@@ -286,5 +330,5 @@ def print_summary_table(rows: list[dict], wer_threshold: float = 0.05) -> tuple[
             cells.append(f"{v:<{w}}")
         print("  ".join(cells))
     print("=" * len(header))
-    print(f"PASSED: {passed}  FAILED: {failed}  TOTAL: {len(rows)}")
+    print(f"PASSED: {passed}  FAILED: {failed}  SKIPPED: {skipped}  TOTAL: {len(rows)}")
     return passed, failed

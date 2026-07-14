@@ -66,6 +66,7 @@ from e2e_test_common import (
     download_sample,
     expected_text_for_loops,
     fmt_wer,
+    language_supported,
     multiply_wav,
     print_summary_table,
     trim_trailing_silence,
@@ -118,6 +119,15 @@ class StreamScenario:
     # would falsely PASS on a served session). Verifies the reject-unknown-params
     # gate at the WS handshake (off-allowlist param → 400 before the 101).
     expect_error_substring: str | None = None
+    # None = no restriction (default). Set ONLY when the endpoint hard-rejects
+    # (a real error, not a graceful warning/no-op) outside this language set —
+    # see `language_supported()` in e2e_test_common. No streaming scenario
+    # needs this today (summarize/topics/intents/sentiment are pre-recorded
+    # only; dictation/measurements/redact degrade gracefully rather than
+    # hard-reject per a 2026-07-14 docs+empirical audit) — field exists for
+    # parity with the batch driver so a future language-gated feature has
+    # somewhere to go.
+    supported_languages: list[str] | None = None
     notes: str = ""
 
 
@@ -722,6 +732,16 @@ def main() -> int:
     rows: list[dict] = []
     for scenario in scenarios:
         print(f"--> {scenario.name}  ({scenario.description})")
+        if not language_supported(scenario.supported_languages, args.language):
+            reason = (f"language not supported: scenario supports "
+                      f"{scenario.supported_languages}, run --language={args.language!r}")
+            print(f"    SKIP  {reason}")
+            rows.append({
+                "scenario": scenario.name, "ok": True, "skipped": True,
+                "wer": None, "sdi": (0, 0, 0), "words": 0, "elapsed_s": 0.0,
+                "notes": f"SKIPPED ({reason})",
+            })
+            continue
         row = run_scenario(
             scenario,
             endpoint=args.endpoint_name,
@@ -738,8 +758,9 @@ def main() -> int:
             subprocess_timeout_s=args.subprocess_timeout_s,
         )
         rows.append(row)
-        flag = "PASS" if row["ok"] else "FAIL"
-        print(f"    {flag}  WER={fmt_wer(row['wer'])}  elapsed={row['elapsed_s']:.1f}s  {row['notes']}")
+        flag = "SKIP" if row.get("skipped") else ("PASS" if row["ok"] else "FAIL")
+        wer_str = "-" if row.get("skipped") else fmt_wer(row["wer"])
+        print(f"    {flag}  WER={wer_str}  elapsed={row['elapsed_s']:.1f}s  {row['notes']}")
 
     # 4. Summary
     print()
