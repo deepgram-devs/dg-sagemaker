@@ -287,13 +287,20 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
         # ---- Redaction / entity detection (bundle-dependent) ----
         StreamScenario(
             name="feature_redact_name",
-            description="--redact name (requires streaming-ner component)",
+            description="--redact name (requires streaming-ner component; English-classified transcript only)",
             connections=1,
             extra_args=["--redact", "name"],
             wer_threshold=1.0,
             bundle_component="streaming-ner",
             tolerated_error_substring="entity detection",
-            notes="WER skipped; PASS-WITH-NOTE if bundle lacks streaming-ner",
+            supported_languages=["en", "multi"],
+            notes=(
+                "WER skipped; PASS-WITH-NOTE if bundle lacks streaming-ner. "
+                "Self-hosted redaction (batch AND streaming) is English-only "
+                "per docs — 'multi' passes because language-detect on English "
+                "audio resolves to English; a forced non-English language "
+                "won't — auto-skipped outside en/multi"
+            ),
         ),
         # ---- Adversarial ----
         StreamScenario(

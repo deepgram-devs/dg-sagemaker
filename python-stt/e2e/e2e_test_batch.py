@@ -306,12 +306,20 @@ def _all_scenarios() -> list[BatchScenario]:
         # ---- Bundle-component-dependent (will FAIL until bundle adds these) ----
         BatchScenario(
             name="sync_25s_redact_name",
-            description="sync + redact=name (requires batch entity detection)",
+            description="sync + redact=name (requires batch entity detection; English-classified transcript only)",
             transport="sync",
             custom_params={"redact": "name"},
             wer_threshold=1.0,
             bundle_component="semantic_tagger (uuid 06bc8f36-... mode=batch)",
-            notes="batch entity-detection model NOT yet in FEATURE_COMPONENTS",
+            supported_languages=["en", "multi"],
+            notes=(
+                "confirmed 2026-07-14 (stem listen.rs:2804-2822): entity-based "
+                "redaction only routes to impeller when the TRANSCRIPT is "
+                "classified Englishness::All — 'multi' passes because "
+                "language-detect on English audio resolves to English, but a "
+                "forced non-English language hard-500s ('Redaction unavailable') "
+                "regardless of bundle content — auto-skipped outside en/multi"
+            ),
         ),
         BatchScenario(
             name="sync_25s_summarize",
@@ -427,12 +435,13 @@ def _all_scenarios() -> list[BatchScenario]:
         ),
         BatchScenario(
             name="async_15min_redact_name",
-            description="async + redact=name (requires batch entity detection)",
+            description="async + redact=name (requires batch entity detection; English-classified transcript only)",
             transport="async",
             use_long_form=True,
             custom_params={"redact": "name"},
             wer_threshold=1.0,
             bundle_component="semantic_tagger (uuid 06bc8f36-... mode=batch)",
+            supported_languages=["en", "multi"],
         ),
     ]
 
