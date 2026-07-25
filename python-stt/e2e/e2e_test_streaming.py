@@ -134,7 +134,7 @@ class StreamScenario:
 def default_scenarios(model: str, language: str) -> list[StreamScenario]:
     """Feature coverage matrix per the docs (nova-3, streaming):
 
-      Always-supported by stem on nova-3 streaming (per docs):
+      Always-supported by the API on nova-3 streaming (per docs):
         punctuate, smart_format, numerals, dictation, diarize (v1),
         keyterm, replace (find/replace), profanity_filter,
         interim_results, search
@@ -199,7 +199,7 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
             tail_check="today",  # reference ends "...that we have today."
             notes=(
                 "regression guard: CloseStream sent as DataType=UTF8 (WS Text "
-                "frame, the default) must reach stem AND the client must drain "
+                "frame, the default) must reach the API AND the client must drain "
                 "before closing input, or the trailing segment is dropped. See "
                 "close_stream_binary_frame for the DataType=BINARY counterpart"
             ),
@@ -316,15 +316,15 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
         # Mirror of tail_finalize_notail, but with the control message sent as
         # DataType=BINARY. SageMaker maps DataType to the WebSocket opcode
         # (bidi container contract §3.1): UTF8 -> Text, absent/BINARY -> Binary.
-        # Stem parses control messages only from Text frames, so a BINARY
-        # CloseStream reaches it only via the shim's binary-control reframing
-        # (inference-shim/src/ws_proxy.rs `client_to_stem_msg`). Same tail_check
+        # Control messages are parsed only from Text frames, so a BINARY
+        # CloseStream reaches it only via the container's binary-control
+        # reframing. Same tail_check
         # as the UTF8 scenario: if the reframe regresses, the CloseStream is
         # consumed as audio, the last segment is never finalized, and the tail
         # word goes missing.
         StreamScenario(
             name="close_stream_binary_frame",
-            description="--control-data-type BINARY (shim binary→text reframing)",
+            description="--control-data-type BINARY (container binary→text reframing)",
             connections=1,
             use_notail=True,
             extra_args=[
@@ -333,11 +333,11 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
             ],
             tail_check="today",
             notes=(
-                "regression guard for the DataType-omitted client: the shim must "
+                "regression guard for the DataType-omitted client: the container must "
                 "reframe a binary CloseStream to Text or the tail is dropped"
             ),
         ),
-        # ---- Negative: reject-unknown-params gate (shim 400s off-allowlist params) ----
+        # ---- Negative: reject-unknown-params gate (container 400s off-allowlist params) ----
         StreamScenario(
             name="reject_unknown_param",
             description="--extra bogus=true → WS upgrade rejected (not a stream)",
@@ -346,13 +346,13 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
             # SageMaker's bidi-stream does NOT propagate the container's
             # WS-handshake response body, so the customer sees a generic
             # "Failed to establish WebSocket connection" (424) rather than the
-            # shim's `unsupported_parameter` JSON (unlike the HTTP /invocations
+            # container's `unsupported_parameter` JSON (unlike the HTTP /invocations
             # path, which surfaces it). The reject still fires at the handshake —
-            # confirmed in the shim log ("rejecting request: unsupported query
+            # confirmed in the container log ("rejecting request: unsupported query
             # parameter(s)"). On a healthy endpoint (where the plain scenarios
             # pass) a 424 for a bogus param can only be this gate.
             expect_error_substring="Failed to establish WebSocket connection",
-            notes="reject-unknown-params: off-allowlist key must reject the upgrade (generic 424; reason in shim logs)",
+            notes="reject-unknown-params: off-allowlist key must reject the upgrade (generic 424; reason in container logs)",
         ),
     ]
 
@@ -553,7 +553,7 @@ def run_scenario(
         notes_parts.append(f"interim_total={interim_total}")
 
     # PASS-WITH-NOTE: bundle missing the component this scenario requires.
-    # The stem returns a known error pattern (e.g. "entity detection" for
+    # The API returns a known error pattern (e.g. "entity detection" for
     # redact on a bundle lacking streaming-ner); we surface the bundle gap
     # without false-failing.
     all_error_text = " ".join(

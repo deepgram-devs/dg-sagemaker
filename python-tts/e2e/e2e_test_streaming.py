@@ -181,7 +181,7 @@ def default_scenarios(language: str, voice_coverage_n: int = 3) -> list[TTSStrea
         ))
 
     # Cross-language negative — confirms the bundle is monolingual. On streaming,
-    # a stem rejection for the wrong-language voice surfaces as no audio + the
+    # an API rejection for the wrong-language voice surfaces as no audio + the
     # Flushed-ack 30s timeout (the actual MODEL_DOES_NOT_SUPPORT error rides a
     # ModelStreamError frame that the tts_stress per-conn summary records as
     # "Flushed-ack timeout"). Treat that signature as the tolerated error.

@@ -180,7 +180,7 @@ class DeepgramSageMakerConnection:
         # URL-encode values. Critical for params whose values carry reserved
         # query-string characters (`:`, `&`, etc.) — e.g. `replace=src:dst`,
         # which SageMaker's bidi-stream `model_query_string` would otherwise
-        # mangle to an empty `replace: {}` on the stem side.
+        # mangle to an empty `replace: {}` on the API side.
         query_string = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in query_params.items())
 
         if keywords_list:
@@ -252,8 +252,9 @@ class DeepgramSageMakerConnection:
         """Send a Deepgram-compatible JSON control message.
 
         Uses ``--control-data-type`` (default ``UTF8``, the correct and
-        documented setting). ``BINARY`` reaches the server only via the shim's
-        deprecated binary→text reframing, and is selectable to exercise it.
+        documented setting). ``BINARY`` reaches the server only via the
+        container's deprecated binary→text reframing, and is selectable to
+        exercise it.
         """
         message = json.dumps({"type": message_type}).encode("utf-8")
         return await self._send_payload_bytes(
@@ -321,7 +322,7 @@ class DeepgramSageMakerConnection:
         to the container as a WebSocket Close, and doing that immediately after
         CloseStream races the server's CloseStream-triggered finalize — the
         server flushes the trailing segment and then closes the response stream,
-        but a near-simultaneous Close makes stem break before that final result
+        but a near-simultaneous Close makes the API break before that final result
         is delivered, dropping the tail. The well-behaved sequence
         is: send CloseStream, drain the response stream until the server closes
         it, THEN close the input stream as cleanup (see ``end_session``).
@@ -330,9 +331,10 @@ class DeepgramSageMakerConnection:
         That field picks the WebSocket opcode SageMaker delivers to the container
         (AWS bidi container contract §3.1): ``UTF8`` → Text frame, absent or
         ``BINARY`` → Binary frame. Deepgram control messages are only parsed in
-        stem's text arm, so ``UTF8`` is the correct and documented setting —
-        ``BINARY`` works only because the shim sniffs small JSON-object binary
-        frames and reframes them, and is kept selectable to exercise that path.
+        from Text frames, so ``UTF8`` is the correct and documented setting —
+        ``BINARY`` works only because the container sniffs small JSON-object
+        binary frames and reframes them, and is kept selectable to exercise
+        that path.
 
         Idempotent and a no-op when this connection has CloseStream disabled
         (``--no-use-close-stream``) or the input stream is already closed.
@@ -1918,9 +1920,9 @@ async def main() -> int:
             "PayloadPart.DataType used for Deepgram control messages such as "
             "CloseStream. SageMaker maps this to the WebSocket opcode delivered "
             "to the container: UTF8 -> Text frame, BINARY -> Binary frame. "
-            "Control messages are only parsed in stem's text arm, so UTF8 is "
+            "Control messages are only parsed from Text frames, so UTF8 is "
             "correct and is what the Deepgram SageMaker docs recommend. BINARY "
-            "reaches stem only via the shim's binary-control reframing "
+            "reaches the API only via the container's binary-control reframing "
             "fallback — select it to exercise that path (default: UTF8). "
             "Audio chunks are always BINARY."
         ),
@@ -1954,7 +1956,7 @@ async def main() -> int:
             "Write one JSONL line per connection at end of run with "
             "dg_request_id, per-message-type counts, transcript counts, "
             "first-final latency, close reason, error messages, and ring-buffer "
-            "tail. Use to correlate client-visible behavior with shim CloudWatch "
+            "tail. Use to correlate client-visible behavior with container CloudWatch "
             "logs by dg_request_id."
         ),
     )

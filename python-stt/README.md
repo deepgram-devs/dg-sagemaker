@@ -575,7 +575,7 @@ uv run e2e/e2e_test_streaming.py your-endpoint --wer-threshold 0.03
 | `feature_keyterms` | `--keyterms 'spacewalk,female'` — presence check on `spacewalk` |
 | `feature_redact_name` | `--redact name` — presence of redaction marker, WER skipped |
 | `adversarial_bare_close` | `--no-use-close-stream` — bare WS close (relaxed WER 10 %) |
-| `reject_unknown_param` | `--extra bogus=true` — negative: PASSES only if the upgrade is rejected (400) and no audio streams; verifies the shim's reject-unknown-params gate |
+| `reject_unknown_param` | `--extra bogus=true` — negative: PASSES only if the upgrade is rejected (400) and no audio streams; verifies the container's reject-unknown-params gate |
 
 Exit code 0 = all pass, non-zero = any scenario failed. Per-scenario stdout / stderr / summary-jsonl land in `<workdir>/logs/<scenario>.{stdout,stderr,summary.jsonl}.log` for triage; aggregated `results.json` at `<workdir>/results.json`. Default workdir: `/tmp/dg-sagemaker-e2e/streaming/<timestamp>/`.
 

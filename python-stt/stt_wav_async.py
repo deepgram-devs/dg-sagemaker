@@ -140,7 +140,7 @@ def _build_async_query_string(args, extra_pairs: list[tuple[str, str]]) -> str:
     The string is sent as `X-Amzn-SageMaker-Custom-Attributes`. The
     Deepgram container parses it as `path?query`, so the leading
     `v1/listen?` prefix is mandatory — a bare query string lands on a
-    non-routable path inside stem and returns 404.
+    non-routable path inside the API and returns 404.
     """
     params: list[str] = [
         f"model={args.model}",

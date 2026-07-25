@@ -131,7 +131,7 @@ def default_scenarios(mode: str) -> list[BatchScenario]:
 
     Feature coverage matrix per the docs (nova-3, pre-recorded):
 
-      Always-supported by stem on pre-recorded nova-3:
+      Always-supported by the API on pre-recorded nova-3:
         punctuate, smart_format, numerals, measurements, dictation,
         diarize (v1), diarize_model=v2, keyterm, replace (find/replace),
         filler_words, utterances, utt_split, paragraphs,
@@ -141,15 +141,15 @@ def default_scenarios(mode: str) -> list[BatchScenario]:
         nova-3-medical, so the filler_words scenario is N/A for those
         models even on pre-recorded; see
         https://developers.deepgram.com/docs/filler-words
-      Bundle-component dependent (Wilhelmina families that EXIST but
+      Bundle-component dependent (model-catalog families that EXIST but
       are not yet added to FEATURE_COMPONENTS for batch — these
       scenarios will FAIL on the current MP bundles until we add them):
         - smart_format (with entity-aware formatting) + redact /
           detect_entities → semantic_tagger
           (uuid 06bc8f36-e59b-43b0-a1a9-47281c893ee8,
            descriptor name="default", mode="batch")
-          NB. CLAUDE.md memory previously said "Wilhelmina has no
-          batch NER model" — that was wrong; semantic_tagger and
+          NB. an earlier note claimed the model catalog had no
+          batch NER model — that was wrong; semantic_tagger and
           broccolizer (6946b038-...) both exist at batch mode.
         - search → g2p
           (uuid 89555db3-b00f-4808-a6af-2db8b73acf14,
@@ -195,7 +195,7 @@ def _all_scenarios() -> list[BatchScenario]:
             custom_params={"diarize_model": "v2"},
             notes=(
                 "diarize_model=v2 is pre-recorded only; streaming returns 400. "
-                "Must be sent WITHOUT diarize=true — stem main (2026-06, post "
+                "Must be sent WITHOUT diarize=true — the API (2026-06, post "
                 "1.192) rejects the combo with 400 'diarize_model cannot be "
                 "used together with diarize or diarize_version'."
             ),
@@ -207,7 +207,7 @@ def _all_scenarios() -> list[BatchScenario]:
             custom_params={"smart_format": "true"},
             bundle_component="semantic_tagger (uuid 06bc8f36-... mode=batch)",
             notes=(
-                "stem's smart_format implicitly requests entity detection "
+                "the API's smart_format implicitly requests entity detection "
                 "when format_entity_tags=true; needs the batch NER model"
             ),
         ),
@@ -313,8 +313,8 @@ def _all_scenarios() -> list[BatchScenario]:
             bundle_component="semantic_tagger (uuid 06bc8f36-... mode=batch)",
             supported_languages=["en", "multi"],
             notes=(
-                "confirmed 2026-07-14 (stem listen.rs:2804-2822): entity-based "
-                "redaction only routes to impeller when the TRANSCRIPT is "
+                "confirmed 2026-07-14: entity-based redaction only routes to "
+                "the engine when the TRANSCRIPT is "
                 "classified Englishness::All — 'multi' passes because "
                 "language-detect on English audio resolves to English, but a "
                 "forced non-English language hard-500s ('Redaction unavailable') "
@@ -333,7 +333,7 @@ def _all_scenarios() -> list[BatchScenario]:
             tolerated_error_substring="summarize",
             supported_languages=["en"],
             notes=(
-                "confirmed 2026-07-14: stem hard-rejects with 400 "
+                "confirmed 2026-07-14: the API hard-rejects with 400 "
                 '"Summarization v2 not supported for non-English languages" '
                 "for any non-English/multi request, regardless of bundle "
                 "content — auto-skipped outside --language en"
@@ -369,14 +369,14 @@ def _all_scenarios() -> list[BatchScenario]:
             tolerated_error_substring="sentiment",
             notes="English only",
         ),
-        # ---- Negative: reject-unknown-params gate (shim 400s off-allowlist params) ----
+        # ---- Negative: reject-unknown-params gate (container 400s off-allowlist params) ----
         BatchScenario(
             name="sync_25s_reject_unknown_param",
             description="sync + bogus=true → expect 400 unsupported_parameter (not served)",
             transport="sync",
             custom_params={"bogus": "true"},
             expect_error_substring="unsupported_parameter",
-            notes="reject-unknown-params: off-allowlist key must 400 before stem, not serve",
+            notes="reject-unknown-params: off-allowlist key must 400 before the API, not serve",
         ),
         BatchScenario(
             name="sync_25s_reject_unknown_param_falsy",
@@ -427,7 +427,7 @@ def _all_scenarios() -> list[BatchScenario]:
             tolerated_error_substring="summarize",
             supported_languages=["en"],
             notes=(
-                "confirmed 2026-07-14: stem hard-rejects with 400 "
+                "confirmed 2026-07-14: the API hard-rejects with 400 "
                 '"Summarization v2 not supported for non-English languages" '
                 "for any non-English/multi request, regardless of bundle "
                 "content — auto-skipped outside --language en"
@@ -453,7 +453,7 @@ def _all_scenarios() -> list[BatchScenario]:
 def _build_query(params: dict[str, str]) -> str:
     """Build the v1/listen?... custom-attributes string.
 
-    `diarize` and `diarize_model` are mutually exclusive in stem
+    `diarize` and `diarize_model` are mutually exclusive in the API
     (`diarize_model cannot be used together with diarize or
     diarize_version`), so the auto-added `diarize=false` default is
     suppressed when the caller already sets `diarize_model`. Same idea
@@ -470,7 +470,7 @@ def _build_query(params: dict[str, str]) -> str:
     if not has_diarize_model:
         base["diarize"] = params.pop("diarize", "false")
     elif "diarize" in params:
-        # Caller passed both — drop the implicit one; stem would 400 anyway.
+        # Caller passed both — drop the implicit one; the API would 400 anyway.
         params.pop("diarize")
     for k, v in base.items():
         parts.append(f"{k}={v}")

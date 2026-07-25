@@ -368,7 +368,7 @@ class DeepgramSageMakerMicrophoneClient:
 
         # 1. Send CloseStream so the server flushes the final transcript.
         #    DataType=UTF8 makes SageMaker deliver this as a WebSocket Text
-        #    frame, which is the only frame type stem parses control messages
+        #    frame, which is the only frame type control messages are parsed
         #    from (AWS bidi container contract §3.1).
         try:
             close_msg = json.dumps({"type": "CloseStream"}).encode("utf-8")

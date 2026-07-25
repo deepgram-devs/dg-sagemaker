@@ -64,11 +64,11 @@ first call.
 
 A multilingual STT listing (e.g. the **Nova-3 Multilingual STT Streaming**
 marketplace product) loads ONE model registered under `language=multi`, not a
-per-language model. Invoke it with `--language multi` — impeller then runs
+per-language model. Invoke it with `--language multi` — the engine then runs
 language detection across the bundled languages. Passing a specific
 `--language en` (which is the **default**) resolves to `model=general
-language=en tier=nova-3`, which a multilingual bundle has no match for: impeller
-logs `Could not find a model that matched … language=en`, stem returns 400, and
+language=en tier=nova-3`, which a multilingual bundle has no match for: the engine
+logs `Could not find a model that matched … language=en`, the API returns 400, and
 **every** WS connection closes in ~1 s with `finals=0` / WER 100 %. That looks
 like a dead endpoint but is just the wrong param — re-run with `--language
 multi` before concluding the listing is broken. (Monolingual listings use the
