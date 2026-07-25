@@ -198,9 +198,10 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
             extra_args=["--extra", "endpointing=300", "--interim-results"],
             tail_check="today",  # reference ends "...that we have today."
             notes=(
-                "regression guard: binary CloseStream over the SageMaker bidi "
-                "transport must reach stem (shim reframe) AND the client must "
-                "drain before closing input, or the trailing segment is dropped"
+                "regression guard: CloseStream sent as DataType=UTF8 (WS Text "
+                "frame, the default) must reach stem AND the client must drain "
+                "before closing input, or the trailing segment is dropped. See "
+                "close_stream_binary_frame for the DataType=BINARY counterpart"
             ),
         ),
         # ---- Streaming-only features ----
@@ -310,6 +311,31 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
             extra_args=["--no-use-close-stream"],
             notes="trailing tail may drop; WER threshold relaxed",
             wer_threshold=0.10,
+        ),
+        # ---- Frame typing: CloseStream as a Binary frame ----
+        # Mirror of tail_finalize_notail, but with the control message sent as
+        # DataType=BINARY. SageMaker maps DataType to the WebSocket opcode
+        # (bidi container contract §3.1): UTF8 -> Text, absent/BINARY -> Binary.
+        # Stem parses control messages only from Text frames, so a BINARY
+        # CloseStream reaches it only via the shim's binary-control reframing
+        # (inference-shim/src/ws_proxy.rs `client_to_stem_msg`). Same tail_check
+        # as the UTF8 scenario: if the reframe regresses, the CloseStream is
+        # consumed as audio, the last segment is never finalized, and the tail
+        # word goes missing.
+        StreamScenario(
+            name="close_stream_binary_frame",
+            description="--control-data-type BINARY (shim binary→text reframing)",
+            connections=1,
+            use_notail=True,
+            extra_args=[
+                "--control-data-type", "BINARY",
+                "--extra", "endpointing=300", "--interim-results",
+            ],
+            tail_check="today",
+            notes=(
+                "regression guard for the DataType-omitted client: the shim must "
+                "reframe a binary CloseStream to Text or the tail is dropped"
+            ),
         ),
         # ---- Negative: reject-unknown-params gate (shim 400s off-allowlist params) ----
         StreamScenario(

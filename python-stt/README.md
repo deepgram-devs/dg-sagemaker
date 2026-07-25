@@ -227,6 +227,26 @@ uv run stt_wav_stress.py stream your-endpoint-name --file audio.wav \
   --no-use-close-stream
 ```
 
+**Control-message frame type (`--control-data-type`):**
+
+Each `PayloadPart` carries a `DataType` that decides the WebSocket opcode SageMaker
+delivers to the container ([bidi container contract §3.1](https://docs.aws.amazon.com/sagemaker/latest/dg/your-algorithms-inference-code.html#your-algorithms-inference-algo-bidi)):
+`UTF8` → Text frame, absent or `BINARY` → Binary frame. Deepgram control messages are
+parsed only from Text frames, so **audio is `BINARY` and control messages are `UTF8`** —
+that is this script's default and what the
+[Deepgram SageMaker docs](https://developers.deepgram.com/docs/deploy-deepgram-amazon-sagemaker)
+tell customers to send.
+
+A client that omits `DataType` gets `BINARY` for everything; those control messages reach
+the server only because the Deepgram container sniffs small JSON-object binary frames and
+reframes them to Text, logging a deprecation warning. Pass `--control-data-type BINARY` to
+exercise that fallback path:
+
+```bash
+uv run stt_wav_stress.py stream your-endpoint-name --file audio.wav \
+  --control-data-type BINARY
+```
+
 **Full example with all stream options:**
 
 ```bash

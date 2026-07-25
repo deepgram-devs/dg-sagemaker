@@ -268,7 +268,10 @@ class DeepgramFluxConnection:
         if not self.is_active:
             return
         try:
-            payload = RequestPayloadPart(bytes_=audio_bytes)
+            # Audio is BINARY — explicit rather than relying on the default, so
+            # the contrast with the UTF8 control messages in _send_json is
+            # visible at the call site.
+            payload = RequestPayloadPart(bytes_=audio_bytes, data_type="BINARY")
             event = RequestStreamEventPayloadPart(value=payload)
             await self.stream.input_stream.send(event)
             self.chunk_count += 1
@@ -337,7 +340,9 @@ class DeepgramFluxConnection:
         if not self.is_active:
             return
         try:
-            payload = RequestPayloadPart(bytes_=KEEPALIVE_PING_BYTES)
+            # BINARY on purpose: this is a silent audio sample, not a control
+            # message — it resets the idle timer by being audio.
+            payload = RequestPayloadPart(bytes_=KEEPALIVE_PING_BYTES, data_type="BINARY")
             event = RequestStreamEventPayloadPart(value=payload)
             await self.stream.input_stream.send(event)
             self.byte_count += len(KEEPALIVE_PING_BYTES)

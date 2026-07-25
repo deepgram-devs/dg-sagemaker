@@ -156,7 +156,7 @@ class DeepgramSageMakerConnection:
             return
 
         try:
-            payload = RequestPayloadPart(bytes_=audio_bytes)
+            payload = RequestPayloadPart(bytes_=audio_bytes, data_type="BINARY")
             event = RequestStreamEventPayloadPart(value=payload)
             await self.stream.input_stream.send(event)
             self.chunk_count += 1
@@ -268,9 +268,12 @@ class DeepgramSageMakerConnection:
         logger.debug(f"[Connection {self.connection_id}] Ending session")
 
         # 1. Send CloseStream so the server flushes the final transcript.
+        #    DataType=UTF8 makes SageMaker deliver this as a WebSocket Text
+        #    frame, which is the only frame type stem parses control messages
+        #    from (AWS bidi container contract §3.1).
         try:
             close_msg = json.dumps({"type": "CloseStream"}).encode("utf-8")
-            payload = RequestPayloadPart(bytes_=close_msg)
+            payload = RequestPayloadPart(bytes_=close_msg, data_type="UTF8")
             event = RequestStreamEventPayloadPart(value=payload)
             await self.stream.input_stream.send(event)
         except Exception as e:

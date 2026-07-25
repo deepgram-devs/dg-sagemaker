@@ -324,7 +324,7 @@ public class StreamingConnection {
 
                     while (active.get() && (bytesRead = ais.read(buf, 0, CHUNK_SIZE)) > 0) {
                         byte[] chunk = (bytesRead == CHUNK_SIZE) ? buf.clone() : java.util.Arrays.copyOf(buf, bytesRead);
-                        audioPublisher.publish(chunk);
+                        audioPublisher.publishAudio(chunk);
                         totalChunks++;
                         chunkCount.set(totalChunks);
 
@@ -375,7 +375,7 @@ public class StreamingConnection {
             // request stream — which tears down the response stream — so closing
             // it immediately after CloseStream races the server's finalize and
             // drops the tail (https://developers.deepgram.com/docs/close-stream).
-            audioPublisher.publish(CLOSE_STREAM_BYTES);
+            audioPublisher.publishControl(CLOSE_STREAM_BYTES);
             try {
                 CountDownLatch rc = responseComplete;
                 if (rc != null && !rc.await(AWAIT_FINAL_RESULTS_SECONDS, TimeUnit.SECONDS)) {
@@ -423,9 +423,21 @@ public class StreamingConnection {
     // Publisher<RequestStreamEvent> required by the AWS SDK.
     // -----------------------------------------------------------------------
     private static class AudioPublisher implements Publisher<RequestStreamEvent> {
+        /**
+         * A queued payload part and the {@code DataType} it must be emitted with.
+         *
+         * SageMaker maps {@code PayloadPart.DataType} to the WebSocket opcode it
+         * delivers to the container (bidirectional container contract §3.1):
+         * {@code UTF8} becomes a Text frame; {@code BINARY} — or an absent
+         * {@code DataType} — becomes a Binary frame. Deepgram parses control
+         * messages only from Text frames, so the type has to travel with the
+         * bytes through the queue instead of being inferred at the emit site.
+         */
+        private record Part(byte[] bytes, String dataType) {}
+
         private volatile Subscriber<? super RequestStreamEvent> subscriber;
         private final AtomicBoolean completed = new AtomicBoolean(false);
-        private final java.util.concurrent.LinkedBlockingQueue<byte[]> queue =
+        private final java.util.concurrent.LinkedBlockingQueue<Part> queue =
             new java.util.concurrent.LinkedBlockingQueue<>(512);
 
         @Override
@@ -453,13 +465,14 @@ public class StreamingConnection {
             // trailing CloseStream message isn't dropped before it's emitted.
             while (emitted < requested) {
                 try {
-                    byte[] chunk = queue.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS);
-                    if (chunk == null) {
+                    Part part = queue.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    if (part == null) {
                         if (completed.get()) break;
                         continue;
                     }
                     RequestStreamEvent event = RequestStreamEvent.payloadPartBuilder()
-                        .bytes(SdkBytes.fromByteArray(chunk))
+                        .bytes(SdkBytes.fromByteArray(part.bytes()))
+                        .dataType(part.dataType())
                         .build();
                     subscriber.onNext(event);
                     emitted++;
@@ -473,10 +486,25 @@ public class StreamingConnection {
             }
         }
 
-        void publish(byte[] chunk) {
+        /** Enqueue audio — always {@code BINARY}. */
+        void publishAudio(byte[] chunk) {
+            publish(chunk, "BINARY");
+        }
+
+        /**
+         * Enqueue a Deepgram control message — always {@code UTF8}, so SageMaker
+         * delivers it as a Text frame and the server acts on it. Sent as BINARY
+         * it is consumed as audio (the Deepgram container reframes it as a
+         * deprecated compatibility fallback, and logs a warning).
+         */
+        void publishControl(byte[] message) {
+            publish(message, "UTF8");
+        }
+
+        private void publish(byte[] bytes, String dataType) {
             if (completed.get()) return;
             try {
-                queue.put(chunk);
+                queue.put(new Part(bytes, dataType));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }

@@ -116,12 +116,14 @@ class DeepgramSageMakerConnection:
     """
 
     def __init__(self, connection_id, client, endpoint_name, write_fn=None,
-                 use_close_stream=True, raw=False, ring_size: int = 50):
+                 use_close_stream=True, raw=False, ring_size: int = 50,
+                 control_data_type: str = "UTF8"):
         self.connection_id = connection_id
         self.client = client
         self.endpoint_name = endpoint_name
         self._write_fn = write_fn or print
         self.use_close_stream = use_close_stream
+        self.control_data_type = control_data_type
         self.raw = raw
         self.stream = None
         self.output_stream = None
@@ -225,22 +227,38 @@ class DeepgramSageMakerConnection:
                     pass
             raise
 
-    async def _send_payload_bytes(self, payload_bytes: bytes, *, require_active=True):
-        """Send one SageMaker event-stream payload, serialized per connection."""
+    async def _send_payload_bytes(self, payload_bytes: bytes, data_type: str, *,
+                                  require_active=True):
+        """Send one SageMaker event-stream payload, serialized per connection.
+
+        ``data_type`` picks the WebSocket opcode SageMaker delivers to the
+        container (AWS bidi container contract §3.1): ``UTF8`` → Text frame,
+        ``BINARY`` (or an absent DataType) → Binary frame. It is required
+        rather than defaulted because getting it wrong is silent: a control
+        message sent as BINARY is consumed as audio unless the server reframes
+        it. Audio is ``BINARY``; control messages are ``UTF8``.
+        """
         if require_active and not self.is_active:
             return False
         if self._input_closed:
             return False
-        payload = RequestPayloadPart(bytes_=payload_bytes)
+        payload = RequestPayloadPart(bytes_=payload_bytes, data_type=data_type)
         event = RequestStreamEventPayloadPart(value=payload)
         async with self._send_lock:
             await self.stream.input_stream.send(event)
         return True
 
     async def _send_control_message(self, message_type: str, *, require_active=True):
-        """Send a Deepgram-compatible JSON control message."""
+        """Send a Deepgram-compatible JSON control message.
+
+        Uses ``--control-data-type`` (default ``UTF8``, the correct and
+        documented setting). ``BINARY`` reaches the server only via the shim's
+        deprecated binary→text reframing, and is selectable to exercise it.
+        """
         message = json.dumps({"type": message_type}).encode("utf-8")
-        return await self._send_payload_bytes(message, require_active=require_active)
+        return await self._send_payload_bytes(
+            message, self.control_data_type, require_active=require_active
+        )
 
     async def _send_keep_alives(self):
         """Send Deepgram KeepAlive control messages while the stream is open."""
@@ -272,7 +290,7 @@ class DeepgramSageMakerConnection:
         if not self.is_active:
             return
         try:
-            await self._send_payload_bytes(audio_bytes)
+            await self._send_payload_bytes(audio_bytes, "BINARY")
             self.chunk_count += 1
             self.byte_count += len(audio_bytes)
             logger.debug(
@@ -307,6 +325,14 @@ class DeepgramSageMakerConnection:
         is delivered, dropping the tail. The well-behaved sequence
         is: send CloseStream, drain the response stream until the server closes
         it, THEN close the input stream as cleanup (see ``end_session``).
+
+        Sent with ``DataType`` from ``--control-data-type`` (default ``UTF8``).
+        That field picks the WebSocket opcode SageMaker delivers to the container
+        (AWS bidi container contract §3.1): ``UTF8`` → Text frame, absent or
+        ``BINARY`` → Binary frame. Deepgram control messages are only parsed in
+        stem's text arm, so ``UTF8`` is the correct and documented setting —
+        ``BINARY`` works only because the shim sniffs small JSON-object binary
+        frames and reframes them, and is kept selectable to exercise that path.
 
         Idempotent and a no-op when this connection has CloseStream disabled
         (``--no-use-close-stream``) or the input stream is already closed.
@@ -554,12 +580,14 @@ class MultiConnectionWAVClient:
     """
 
     def __init__(self, endpoint_name, wav_path, region=DEFAULT_REGION, num_connections=1,
-                 use_close_stream=True, raw=False, ring_size: int = 50):
+                 use_close_stream=True, raw=False, ring_size: int = 50,
+                 control_data_type: str = "UTF8"):
         self.endpoint_name = endpoint_name
         self.wav_path = wav_path
         self.region = region
         self.num_connections = num_connections
         self.use_close_stream = use_close_stream
+        self.control_data_type = control_data_type
         self.raw = raw
         self.ring_size = ring_size
         self.bidi_endpoint = f"https://runtime.sagemaker.{region}.amazonaws.com:8443"
@@ -792,6 +820,7 @@ class MultiConnectionWAVClient:
                         use_close_stream=self.use_close_stream,
                         raw=self.raw,
                         ring_size=self.ring_size,
+                        control_data_type=self.control_data_type,
                     )
                     self.connections.append(conn)
 
@@ -1479,6 +1508,7 @@ async def run_stream(args) -> int:
         use_close_stream=args.use_close_stream,
         raw=args.raw,
         ring_size=args.ring_size,
+        control_data_type=args.control_data_type,
     )
 
     try:
@@ -1516,6 +1546,9 @@ async def run_stream(args) -> int:
     print(f"Region:       {args.region}")
     print(f"Loop:         {'yes' if args.loop else 'no'}")
     print(f"Close:        {'CloseStream + WS Close' if args.use_close_stream else 'bare WS Close'}")
+    if args.use_close_stream:
+        frame = "Text" if args.control_data_type == "UTF8" else "Binary"
+        print(f"Control:      DataType={args.control_data_type} (WS {frame} frame)")
     print(f"Limit:        {limit_str}")
     if redact_list:
         print(f"Redact:       {', '.join(redact_list)}")
@@ -1875,6 +1908,21 @@ async def main() -> int:
             "(https://developers.deepgram.com/docs/close-stream). "
             "Pass --no-use-close-stream to exercise the bare WebSocket Close path "
             "instead (default: enabled)."
+        ),
+    )
+    stream_parser.add_argument(
+        "--control-data-type",
+        choices=["UTF8", "BINARY"],
+        default="UTF8",
+        help=(
+            "PayloadPart.DataType used for Deepgram control messages such as "
+            "CloseStream. SageMaker maps this to the WebSocket opcode delivered "
+            "to the container: UTF8 -> Text frame, BINARY -> Binary frame. "
+            "Control messages are only parsed in stem's text arm, so UTF8 is "
+            "correct and is what the Deepgram SageMaker docs recommend. BINARY "
+            "reaches stem only via the shim's binary-control reframing "
+            "fallback — select it to exercise that path (default: UTF8). "
+            "Audio chunks are always BINARY."
         ),
     )
     stream_parser.add_argument(
