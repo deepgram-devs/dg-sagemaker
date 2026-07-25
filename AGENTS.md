@@ -2,6 +2,38 @@
 
 Notes for AI agents working in this repo.
 
+## This is an external, customer-facing repository — no internal codenames
+
+Customers read this code. **Never use Deepgram-internal component codenames**
+anywhere they can be seen — comments, docstrings, `--help` text, log messages,
+scenario names/notes, commit messages, READMEs. Use the external name a
+customer would recognise from the public docs:
+
+| internal codename | use instead |
+|---|---|
+| stem | the API / the API server |
+| shim | the container / the Deepgram container |
+| impeller | the engine |
+| Wilhelmina | the model catalog |
+
+Also **do not cite internal source**: no `listen.rs:2804-2822` line references,
+no `inference-shim/src/...` paths, no internal symbol names, no "CLAUDE.md
+says …". Keep the substance (what the behavior is, when it was confirmed) and
+drop the pointer.
+
+Exception: strings that are real identifiers rather than descriptions — model
+and component names a customer actually passes or stages (`nova-3`,
+`flux-general-multi`, `semantic_tagger`, `g2p`, and their UUIDs) — stay as they
+are. The test is whether renaming it would break something; if it is prose,
+rename it.
+
+Check before pushing:
+
+```bash
+grep -rniw "stem\|shim\|impeller\|wilhelmina" \
+  --include='*.py' --include='*.ts' --include='*.java' --include='*.md' .
+```
+
 ## Keep the top-level README in sync
 
 [`README.md`](README.md) at the repo root is the index of every script, grouped
