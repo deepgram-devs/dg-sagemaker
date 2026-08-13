@@ -59,6 +59,26 @@ End-to-end correctness gates ([`python-tts/e2e/`](python-tts/e2e/)) — validate
 
 ---
 
+## Flux TTS (Turn-based TTS)
+
+### Python
+
+See [python-flux-tts/README.md](python-flux-tts/README.md) for full setup and usage.
+Flux TTS uses `/v2/speak` and a turn-based protocol (`Speak` … `Flush`), so it has
+its own client rather than sharing the Aura-2 one. Requires `ml.g6.2xlarge` or
+newer — it does not run on g5 or g4dn.
+
+Scripts:
+
+- [`flux_tts_client.py`](python-flux-tts/flux_tts_client.py) — shared client for both surfaces: `FluxTtsStream` (websocket `/v2/speak` over SageMaker bidirectional streaming) and `invoke_batch()` (`POST /invocations`)
+
+End-to-end correctness gates ([`python-flux-tts/e2e/`](python-flux-tts/e2e/)) — both transports are served by the same endpoint, so one deployment covers both drivers:
+
+- [`e2e/e2e_test_batch.py`](python-flux-tts/e2e/e2e_test_batch.py) — `POST /invocations` → `/v2/speak`; audio validity, `container=wav`, speed→duration, and negative controls (unknown param, Aura model rejected)
+- [`e2e/e2e_test_streaming.py`](python-flux-tts/e2e/e2e_test_streaming.py) — websocket `/v2/speak`; the turn-based behaviors (per-turn `SpeechMetadata` accounting, multi-turn, incremental `Speak`, `Interrupt`, mid-stream `Configure{speed}`, concurrency)
+
+---
+
 ## Flux (Conversational STT)
 
 ### Python
