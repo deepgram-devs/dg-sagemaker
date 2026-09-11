@@ -243,7 +243,24 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
             description="--extra numerals=true (digit substitution)",
             connections=1,
             extra_args=["--extra", "numerals=true"],
-            notes="numerals param accepted; clip has few numbers — smoke",
+            # "first" -> "1st" is the clip's ONLY numeral. Verified 2026-09-10
+            # against a live transcript: baseline says "the first spacewalk",
+            # numerals=true says "the 1st spacewalk".
+            #
+            # presence_check is what actually tests the feature. The old
+            # WER-only form had it backwards: it PASSED when numerals silently
+            # did nothing (baseline WER, no substitution) and FAILED on any
+            # bundle whose baseline sat near the 5% gate, because the one
+            # substitution the feature itself creates pushed it over. On
+            # nova-3 multilingual that is 4.92% -> 6.56% against a 5% gate.
+            #
+            # 0.1 deliberately, not 1.0: it absorbs the substitution the
+            # feature creates while still failing a transcript that has
+            # collapsed. Do not raise it to 1.0 — that would drop all
+            # accuracy coverage from this row.
+            wer_threshold=0.1,
+            presence_check="1st",
+            notes="digit substitution: 'first' -> '1st'; WER relaxed to 10%",
         ),
         StreamScenario(
             name="feature_dictation",
@@ -267,7 +284,22 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
             connections=1,
             extra_args=["--keyterms", "spacewalk,female"],
             presence_check="spacewalk",
-            notes="nova-3 only — `keyterm`, NOT `keywords`",
+            # KNOWN NON-REGRESSION ON nova-3 MULTILINGUAL — do not re-investigate.
+            # Supplying keyterm DELETES the term from the transcript there:
+            #   baseline    "...celebrating, the first spacewalk, with an all..."
+            #   keyterm=on  "...celebrating, the first,           with an all..."
+            # so presence_check fails and WER moves 4.92% -> 6.56% against the
+            # 5% gate. Verified identical on the 2026-08-13 version by a control
+            # deploy on 2026-09-10, so it predates that release and is a
+            # property of the multilingual model, not of any image since.
+            # Monolingual is unaffected (1.64%, presence ok).
+            #
+            # Do NOT "fix" this by switching presence_check to "female":
+            # "female" survives with and without the keyterm, so the row would
+            # go green while hiding the deletion this check exists to catch.
+            # If the red is unwanted, gate the scenario to monolingual bundles
+            # explicitly rather than weakening the assertion.
+            notes="nova-3 only — `keyterm`, NOT `keywords`; multilingual deletes the term (known, see comment)",
         ),
         StreamScenario(
             name="feature_replace",

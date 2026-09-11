@@ -285,7 +285,24 @@ def _all_scenarios() -> list[BatchScenario]:
             description="sync + numerals=true (digit substitution)",
             transport="sync",
             custom_params={"numerals": "true"},
-            notes="digit substitution; clip has few numbers — smoke",
+            # "first" -> "1st" is the clip's ONLY numeral. Verified 2026-09-10
+            # against a live transcript: baseline says "the first spacewalk",
+            # numerals=true says "the 1st spacewalk".
+            #
+            # presence_check is what actually tests the feature. The old
+            # WER-only form had it backwards: it PASSED when numerals silently
+            # did nothing (baseline WER, no substitution) and FAILED on any
+            # bundle whose baseline sat near the 5% gate, because the one
+            # substitution the feature itself creates pushed it over. On
+            # nova-3 multilingual that is 4.92% -> 6.56% against a 5% gate.
+            #
+            # 0.1 deliberately, not 1.0: it absorbs the substitution the
+            # feature creates while still failing a transcript that has
+            # collapsed. Do not raise it to 1.0 — that would drop all
+            # accuracy coverage from this row.
+            wer_threshold=0.1,
+            presence_check="1st",
+            notes="digit substitution: 'first' -> '1st'; WER relaxed to 10%",
         ),
         BatchScenario(
             name="sync_25s_measurements",
@@ -308,8 +325,23 @@ def _all_scenarios() -> list[BatchScenario]:
             description="sync + keyterm (spacewalk,female; nova-3 boost)",
             transport="sync",
             custom_params={"keyterm": "spacewalk", "keyterm2": "female"},
+            # KNOWN NON-REGRESSION ON nova-3 MULTILINGUAL — do not re-investigate.
+            # Supplying keyterm DELETES the term from the transcript there:
+            #   baseline    "...celebrating, the first spacewalk, with an all..."
+            #   keyterm=on  "...celebrating, the first,           with an all..."
+            # so presence_check fails and WER moves 4.92% -> 6.56% against the
+            # 5% gate. Verified identical on the 2026-08-13 version by a control
+            # deploy on 2026-09-10, so it predates that release and is a
+            # property of the multilingual model, not of any image since.
+            # Monolingual is unaffected (1.64%, presence ok).
+            #
+            # Do NOT "fix" this by switching presence_check to "female":
+            # "female" survives with and without the keyterm, so the row would
+            # go green while hiding the deletion this check exists to catch.
+            # If the red is unwanted, gate the scenario to monolingual bundles
+            # explicitly rather than weakening the assertion.
             presence_check="spacewalk",
-            notes="nova-3 only — `keyterm`, NOT `keywords`",
+            notes="nova-3 only — `keyterm`, NOT `keywords`; multilingual deletes the term (known, see comment)",
         ),
         BatchScenario(
             name="sync_25s_replace",
