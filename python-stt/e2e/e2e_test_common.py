@@ -39,6 +39,74 @@ SPACEWALK_REFERENCE_TEXT = (
 
 
 # ---------------------------------------------------------------------------
+# Japanese fixture (COMMITTED, not downloaded)
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS. Every other clip in this suite is English, which makes the
+# east-asian nova-3 bundles (zh/ja/ko/vi/id/th) unverifiable: they carry no `en`
+# model, so `--language en` is rejected outright, and English audio under
+# `--language ja` is ACCEPTED and returns nothing. Measured 2026-09-11 on the
+# published eastasia streaming version: every connection lived its full ~37 s
+# and returned `finals=0`, which is indistinguishable from a model that is
+# simply broken. A release was signed off on liveness alone because of it.
+#
+# Synthesised with Deepgram TTS so it is ours to commit (no third-party audio
+# rights question) and reproducible:
+#
+#   curl -X POST "https://api.deepgram.com/v1/speak\
+#       ?model=aura-2-fujin-ja&encoding=linear16&sample_rate=24000" \
+#     -H "Authorization: Token $DEEPGRAM_API_KEY" \
+#     -H "Content-Type: application/json" \
+#     -d '{"text": "<JA_REFERENCE_TEXT>"}'
+#
+# NOTE the response's RIFF header carries a streaming placeholder size
+# (0x7fff0024), so the bytes must be re-wrapped with correct chunk sizes before
+# `wave` reports a usable frame count — the committed file already is.
+#
+# `aura-2-fujin-ja` was chosen over `aura-2-izanami-ja` by round-tripping both
+# through nova-3 `language=ja`: fujin came back at confidence 1.0 retaining
+# 宇宙飛行士, where izanami dropped 宇宙. Mono / 24 kHz / 16-bit / ~22.5 s,
+# RMS 1171, peak 15856.
+JA_FIXTURE = Path(__file__).parent / "fixtures" / "ja_reference_24k.wav"
+
+JA_REFERENCE_TEXT = (
+    "こんにちは。これは日本語の音声認識をテストするための音声です。"
+    "今日の東京の天気は晴れで、気温は二十度です。"
+    "会議は午後三時に始まりますので、資料を準備してください。"
+    "宇宙飛行士のチームが来週、記者会見を行う予定です。"
+    "ご不明な点がありましたら、遠慮なくお問い合わせください。"
+    "よろしくお願いいたします。"
+)
+
+# WORD-LEVEL WER IS MEANINGLESS ON THIS CLIP — do not wire it into the existing
+# threshold. Japanese is written without spaces, so `text.split()` yields ONE
+# token for both reference and hypothesis; any difference at all scores 100%
+# and an exact match scores 0%, with nothing in between. Judge this fixture by
+# the checks below (or add a character-error-rate metric before using a
+# numeric gate).
+#
+# These substrings survived the round-trip verbatim and are what a working
+# `ja` model must produce. Presence of these + finals > 0 is the real signal,
+# and it is exactly the signal the English clip cannot give for this bundle.
+JA_PRESENCE_TERMS = ("東京", "宇宙飛行士", "午後三時", "記者会見")
+
+
+def ja_fixture() -> Path:
+    """Path to the committed Japanese clip; raises if it is missing.
+
+    Unlike `download_sample`, this does NOT fetch anything — the point of
+    committing it is that a target-language verification cannot silently
+    degrade into "no audio available, skipped".
+    """
+    if not JA_FIXTURE.exists():
+        raise FileNotFoundError(
+            f"Japanese fixture missing at {JA_FIXTURE}. It is committed to the "
+            "repo on purpose; restore it rather than skipping the check."
+        )
+    return JA_FIXTURE
+
+
+# ---------------------------------------------------------------------------
 # Fixture management
 # ---------------------------------------------------------------------------
 
