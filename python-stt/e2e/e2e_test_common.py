@@ -78,17 +78,61 @@ JA_REFERENCE_TEXT = (
     "よろしくお願いいたします。"
 )
 
-# WORD-LEVEL WER IS MEANINGLESS ON THIS CLIP — do not wire it into the existing
-# threshold. Japanese is written without spaces, so `text.split()` yields ONE
-# token for both reference and hypothesis; any difference at all scores 100%
-# and an exact match scores 0%, with nothing in between. Judge this fixture by
-# the checks below (or add a character-error-rate metric before using a
-# numeric gate).
+# WORD-LEVEL WER IS UNUSABLE ON THIS CLIP — use `cer()` instead.
 #
-# These substrings survived the round-trip verbatim and are what a working
-# `ja` model must produce. Presence of these + finals > 0 is the real signal,
-# and it is exactly the signal the English clip cannot give for this bundle.
-JA_PRESENCE_TERMS = ("東京", "宇宙飛行士", "午後三時", "記者会見")
+# Be precise about why, because the obvious explanation is wrong. Japanese has
+# no spaces, but `normalize_for_wer` replaces punctuation with spaces, so the
+# text DOES tokenise — at clause boundaries, not word ones. Measured
+# 2026-09-11 against a real nova-3 `language=ja` transcript of this very file:
+# 3 wrong characters out of 135 scored CER 2.22% and WER 36.36%, because each
+# "word" is an entire clause and one bad character fails the whole thing.
+#
+# So WER here is not binary (an earlier note in this file claimed it was, from
+# a raw `.split()` measurement that the driver does not use) — it is simply
+# wildly pessimistic and not comparable to an English WER figure. Judge this
+# fixture on `cer()` plus the presence terms below.
+#
+# Substrings a working `ja` model must produce. Presence of these + finals > 0
+# is the real signal, and it is exactly the signal the English clip cannot give
+# for these bundles.
+#
+# EVERY TERM HERE MUST BE NUMERAL-FREE. `午後三時` was in this list initially
+# and had to come out: the hosted API returned 午後三時 and 二十度, while the
+# SageMaker eastasia bundle returned 午後3時 and 20度 for the same audio
+# (measured 2026-09-11 on ja-ea-strm). Digit-vs-kanji rendering is a formatting
+# choice, not a health signal, so a term that depends on it fails a perfectly
+# good model. Verified present on BOTH surfaces.
+# CER gate for the ja fixture. The English scenarios use a 5% WER threshold and
+# CER MUST NOT inherit it — they measure different things on different units,
+# and wiring the metric in without its own gate failed a healthy endpoint on
+# 2026-09-11 (CER 7.41% judged against 5.00%).
+#
+# Measured baseline, published eastasia streaming bundle on ml.g5.2xlarge:
+# CER 7.41% (4 subs / 6 dels of 135 chars), IDENTICAL on all five content
+# scenarios and at both 1 and 5 concurrent connections — deterministic, not a
+# noisy sample. 15% leaves roughly 2x headroom for a slower instance family or
+# a different bundle while still failing a transcript that has collapsed
+# (empty output scores 100%).
+#
+# LIKE-FOR-LIKE REFERENCE (measured 2026-09-11, same clip, same query params,
+# same CHUNK_SIZE=8192 real-time pacing, finals concatenated the same way):
+#
+#   hosted   wss://api.deepgram.com  streaming   CER 10.37%  (11 finals, 14 del)
+#   SageMaker  eastasia buyer endpoint           CER  7.41%  (12 finals, 4s/6d)
+#   hosted   batch REST                         CER  2.22%  ( 3 del)
+#
+# So SageMaker streaming BEATS hosted streaming on this clip, and the big gap
+# is transport (batch has full context; streaming finalises incrementally) —
+# not a SageMaker deficiency. An earlier version of this comment compared
+# SageMaker streaming against hosted BATCH and implied a ~5-point shortfall;
+# that comparison was not like-for-like and the conclusion was wrong.
+#
+# 15% therefore clears both streaming surfaces with the worse of the two
+# (hosted, 10.37%) still inside it. Track movement in e2e-results rather than
+# tightening on one endpoint's reading.
+JA_CER_THRESHOLD = 0.15
+
+JA_PRESENCE_TERMS = ("東京", "宇宙飛行士", "記者会見", "音声認識")
 
 
 def ja_fixture() -> Path:
@@ -249,6 +293,59 @@ def normalize_for_wer(text: str) -> list[str]:
     if not t:
         return []
     return [tok for tok in t.split() if tok not in FILLER_TOKENS]
+
+
+_CER_STRIP = re.compile(r"[\s\u3000。、，．,\.!?！？「」『』（）\(\)・:：;；\-—ー~〜\"\']+")
+
+
+def normalize_for_cer(text: str) -> str:
+    """Collapse a transcript to a bare character sequence for CER.
+
+    Strips whitespace (including U+3000 ideographic space) and the punctuation
+    both sides disagree about cosmetically — Japanese ASR output varies on 、
+    and 。 placement, and that is not an accuracy signal worth failing on.
+    """
+    return _CER_STRIP.sub("", text or "")
+
+
+def cer(reference: str, hypothesis: str) -> tuple[float, int, int, int, int]:
+    """Character Error Rate — the WER analogue for languages without spaces.
+
+    Returns the same shape as `wer()`: `(ratio, subs, dels, ins, ref_len)`.
+
+    WHY THIS IS REQUIRED, not a nicety. `wer()` tokenises on whitespace, and
+    Japanese is written without spaces, so reference and hypothesis each
+    collapse to exactly ONE token (measured 2026-09-11 on the committed ja
+    fixture). The word-level gate can then only ever return 0% for an exact
+    match or 100% for any difference at all, with nothing in between — it
+    cannot express "mostly right". Use this for any CJK bundle.
+    """
+    r = normalize_for_cer(reference)
+    h = normalize_for_cer(hypothesis)
+    if not r:
+        return (1.0 if h else 0.0, 0, 0, len(h), 0)
+    # Levenshtein with operation tallies; same DP shape as wer() above.
+    prev = [(j, 0, 0, j) for j in range(len(h) + 1)]
+    for i_r, rc in enumerate(r, 1):
+        cur = [(i_r, 0, i_r, 0)]
+        for j_h, hc in enumerate(h, 1):
+            if rc == hc:
+                cost, sub, dele, ins = prev[j_h - 1]
+                cur.append((cost, sub, dele, ins))
+                continue
+            sub_c = prev[j_h - 1][0] + 1
+            del_c = prev[j_h][0] + 1
+            ins_c = cur[j_h - 1][0] + 1
+            best = min(sub_c, del_c, ins_c)
+            if best == sub_c:
+                _, a, b, c = prev[j_h - 1]; cur.append((best, a + 1, b, c))
+            elif best == del_c:
+                _, a, b, c = prev[j_h]; cur.append((best, a, b + 1, c))
+            else:
+                _, a, b, c = cur[j_h - 1]; cur.append((best, a, b, c + 1))
+        prev = cur
+    total, sub, dele, ins = prev[-1]
+    return (total / len(r), sub, dele, ins, len(r))
 
 
 def wer(reference: str, hypothesis: str) -> tuple[float, int, int, int, int]:

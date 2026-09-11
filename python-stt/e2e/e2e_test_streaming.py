@@ -66,6 +66,11 @@ from botocore.config import Config as BotoConfig
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from e2e_test_common import (
     SPACEWALK_REFERENCE_TEXT,
+    JA_CER_THRESHOLD,
+    JA_PRESENCE_TERMS,
+    JA_REFERENCE_TEXT,
+    cer,
+    ja_fixture,
     download_sample,
     expected_text_for_loops,
     fmt_wer,
@@ -458,8 +463,15 @@ def run_scenario(
     log_dir: Path,
     subprocess_timeout_s: int,
     fips: bool = False,
+    audio_lang: str = "en",
 ) -> dict:
-    if scenario.use_long_form:
+    if audio_lang == "ja":
+        # One committed clip serves every non-long-form scenario. There is no
+        # no-trailing-silence or looped long-form Japanese variant, so the
+        # scenarios that need those are filtered out in main() rather than
+        # silently scored against the wrong audio.
+        wav, expected = ja_fixture(), JA_REFERENCE_TEXT
+    elif scenario.use_long_form:
         wav, expected = long_wav, expected_text_for_loops(long_loops)
     elif scenario.use_notail:
         wav, expected = notail_wav, SPACEWALK_REFERENCE_TEXT
@@ -580,7 +592,13 @@ def run_scenario(
     errored = sum(1 for r in rows if r.get("errored"))
     interim_total = sum(r.get("transcripts_interim", 0) for r in rows)
 
-    w_ratio, s, d, i, n = wer(expected, combined)
+    if audio_lang == "ja":
+        # Character Error Rate, not WER — see cer()'s docstring. Reported in
+        # the same column so the table stays readable; the metric name is in
+        # the notes so nobody compares a CER figure to an English WER figure.
+        w_ratio, s, d, i, n = cer(expected, combined)
+    else:
+        w_ratio, s, d, i, n = wer(expected, combined)
 
     notes_parts = []
     if scenario.notes:
@@ -605,7 +623,22 @@ def run_scenario(
     )
 
     presence_ok = True
-    if scenario.presence_check and not tolerated:
+    if audio_lang == "ja":
+        # The scenarios' presence_check values are English artefacts of the
+        # spacewalk clip ("spacewalk", "moonwalk", "1st"), so they are replaced
+        # wholesale rather than evaluated against Japanese audio. These four
+        # terms round-tripped verbatim through nova-3 language=ja at confidence
+        # 1.0, so a healthy model must produce all of them: this is what turns
+        # the east-asian check from "the endpoint is alive" into "the model
+        # transcribes".
+        if not tolerated:
+            missing = [t for t in JA_PRESENCE_TERMS if t not in combined]
+            presence_ok = not missing
+            notes_parts.append(
+                "ja_terms=" + ("all ok" if presence_ok else "MISSING " + ",".join(missing))
+            )
+        notes_parts.append("metric=CER")
+    elif scenario.presence_check and not tolerated:
         presence_ok = scenario.presence_check.lower() in combined.lower()
         notes_parts.append(f"presence({scenario.presence_check})={'ok' if presence_ok else 'MISSING'}")
 
@@ -613,7 +646,7 @@ def run_scenario(
     # dropped trailing segment (tail truncation) that whole-transcript WER would
     # mask. See StreamScenario.tail_check / the tail_finalize_notail scenario.
     tail_ok = True
-    if scenario.tail_check and not tolerated:
+    if scenario.tail_check and not tolerated and audio_lang != "ja":
         tail_ok = scenario.tail_check.lower() in combined.lower()
         notes_parts.append(f"tail({scenario.tail_check})={'ok' if tail_ok else 'TRUNCATED'}")
 
@@ -685,6 +718,14 @@ def _make_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--model", default="nova-3", help="Deepgram model (default: nova-3)")
     p.add_argument("--language", default="en", help="Language code (default: en)")
+    p.add_argument("--audio-lang", default=None, choices=["en", "ja"],
+                   help="Which committed clip to send (default: derived from "
+                        "--language; ja for a Japanese bundle). The east-asian "
+                        "nova-3 bundles carry no en model, so English audio "
+                        "under --language ja is ACCEPTED and returns finals=0 "
+                        "— indistinguishable from a broken model. Pass ja to "
+                        "send the committed Japanese fixture instead and score "
+                        "it with CER + the ja presence terms.")
     p.add_argument(
         "--workdir",
         default=None,
@@ -736,7 +777,22 @@ def main() -> int:
     logging.basicConfig(level=getattr(logging, args.log_level),
                         format="%(asctime)s %(levelname)s %(message)s")
 
+    # Derive the audio language from --language unless overridden. Only ja has a
+    # committed fixture today; zh/ko/vi/id/th still have no target-language
+    # audio, so they remain liveness-only and the run says so rather than
+    # pretending English audio measured them.
+    audio_lang = args.audio_lang or ("ja" if args.language == "ja" else "en")
+
     scenarios = default_scenarios(args.model, args.language)
+
+    if audio_lang == "ja" and args.wer_threshold == 0.05:
+        # Give CER its own gate. Leaving it on the English 5% WER default is
+        # what failed a working endpoint at 7.41% — the two metrics are not
+        # comparable. An explicit --wer-threshold still wins.
+        args.wer_threshold = JA_CER_THRESHOLD
+        for sc in scenarios:
+            if sc.wer_threshold == 0.05:
+                sc.wer_threshold = JA_CER_THRESHOLD
     if args.wer_threshold != 0.05:
         for s in scenarios:
             if s.wer_threshold == 0.05:
@@ -788,6 +844,13 @@ def main() -> int:
     print(f"Runtime URL: {_rt_url}:8443")
     print(f"FIPS:        {'yes' if '-fips.' in _rt_url else 'no'}")
     print(f"Model/lang:  {args.model} / {args.language}")
+    if audio_lang == "ja":
+        print(f"Audio:       COMMITTED ja fixture ({ja_fixture().name}) — "
+              f"metric=CER, presence={'/'.join(JA_PRESENCE_TERMS)}")
+    elif args.language not in ("en", "multi"):
+        print(f"Audio:       English clip against --language {args.language} — "
+              "LIVENESS ONLY, accuracy is NOT being measured "
+              "(no committed fixture for this language)")
     print(f"Workdir:     {workdir}")
     print("=" * 80)
 
@@ -820,6 +883,16 @@ def main() -> int:
 
     # 3. Run scenarios sequentially
     print()
+    if audio_lang == "ja":
+        # No no-trailing-silence or looped long-form Japanese clip exists, so
+        # these would be scored against the wrong audio. Drop them explicitly
+        # instead: a scenario silently fed the wrong fixture is how a suite
+        # reports a failure that says nothing about the product.
+        dropped = [x.name for x in scenarios if x.use_notail or x.use_long_form]
+        if dropped:
+            print(f"Skipping (no ja variant of the clip): {', '.join(dropped)}")
+        scenarios = [x for x in scenarios if not (x.use_notail or x.use_long_form)]
+
     rows: list[dict] = []
     for scenario in scenarios:
         print(f"--> {scenario.name}  ({scenario.description})")
@@ -848,11 +921,13 @@ def main() -> int:
             log_dir=log_dir,
             subprocess_timeout_s=args.subprocess_timeout_s,
             fips=args.fips,
+            audio_lang=audio_lang,
         )
         rows.append(row)
         flag = "SKIP" if row.get("skipped") else ("PASS" if row["ok"] else "FAIL")
         wer_str = "-" if row.get("skipped") else fmt_wer(row["wer"])
-        print(f"    {flag}  WER={wer_str}  elapsed={row['elapsed_s']:.1f}s  {row['notes']}")
+        metric = "CER" if audio_lang == "ja" else "WER"
+        print(f"    {flag}  {metric}={wer_str}  elapsed={row['elapsed_s']:.1f}s  {row['notes']}")
 
     # 4. Summary
     print()
