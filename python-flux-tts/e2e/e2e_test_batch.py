@@ -22,6 +22,7 @@ import argparse
 import logging
 import os
 import sys
+import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -33,6 +34,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from e2e.e2e_test_common import (  # noqa: E402
     LONG_TEXT,
     MAX_SPEED,
+    OUT_OF_RANGE_SPEED,
+    SPEED_RATIO_GATE,
+    SPEED_SAMPLES,
     REFERENCE_TEXT,
     SAMPLE_RATE,
     audio_verdict,
@@ -77,77 +81,97 @@ def sc_long_text(rt, ep, voice):
 def sc_speed(rt, ep, voice):
     """`speed` must be ACCEPTED *and* take effect on the batch surface too.
 
-    `speed` is a supported Flux TTS control, valid over **0.85–1.15** (see
-    `speed_out_of_range`). Accepting the parameter is not a strong enough
-    assertion on its own — a server that parsed it and ignored it would also
-    return audio — so this synthesizes the SAME text at the default rate and at
-    the fastest supported rate and requires the faster render to be measurably
-    shorter.
+    `speed` is a supported Flux TTS control, valid over **0.5–1.5** in 0.05
+    steps (widened 2026-08-31; see `speed_out_of_range`). Accepting the
+    parameter is not a strong enough assertion on its own — a server that
+    parsed it and ignored it would also return audio — so this synthesizes the
+    SAME text at the default rate and at the fastest supported rate and
+    requires the faster render to be measurably shorter.
 
-    At 1.15 the expected duration ratio is ~1/1.15 ≈ 0.87. The 0.95 gate is
-    deliberately loose: the exact ratio depends on how the model redistributes
-    pauses, so this asserts the direction and rough magnitude of the effect, not
-    a precise multiplier.
+    AVERAGED OVER SEVERAL PAIRS. Synthesis is stochastic — the model
+    redistributes pauses differently run to run — so one pair carries real
+    noise and can fail a working knob. Each iteration renders its own default
+    and fast clip, so the ratios are internally paired and drift between
+    iterations cancels; the verdict is the MEAN.
+
+    At MAX_SPEED=1.5 the ideal ratio is 1/1.5 ≈ 0.67 and the gate is
+    SPEED_RATIO_GATE, well above it. The widened range helps the test as well
+    as callers: there is now ~33% of duration signal to detect instead of the
+    ~13% available at 1.15, so noise is nowhere near the decision boundary.
     """
     t0 = time.monotonic()
-    try:
-        base_audio, _ = invoke_batch(rt, ep, REFERENCE_TEXT, voice)
-        fast_audio, fast_meta = invoke_batch(rt, ep, REFERENCE_TEXT, voice, speed=MAX_SPEED)
-    except Exception as e:  # noqa: BLE001
-        return {
-            "scenario": "speed",
-            "ok": False,
-            "notes": f"speed={MAX_SPEED} rejected: {type(e).__name__}: {str(e)[:60]}",
-            "bytes": 0,
-            "duration_s": 0.0,
-            "rms": 0.0,
-            "billable_chars": "",
-            "elapsed_s": time.monotonic() - t0,
-        }
+    ratios: list[float] = []
+    detail: list[str] = []
+    row = None
+    for _ in range(SPEED_SAMPLES):
+        try:
+            base_audio, _ = invoke_batch(rt, ep, REFERENCE_TEXT, voice)
+            fast_audio, fast_meta = invoke_batch(rt, ep, REFERENCE_TEXT, voice, speed=MAX_SPEED)
+        except Exception as e:  # noqa: BLE001
+            return {
+                "scenario": "speed",
+                "ok": False,
+                "notes": f"speed={MAX_SPEED} rejected: {type(e).__name__}: {str(e)[:60]}",
+                "bytes": 0,
+                "duration_s": 0.0,
+                "rms": 0.0,
+                "billable_chars": "",
+                "elapsed_s": time.monotonic() - t0,
+            }
 
-    row = _row("speed", fast_audio, fast_meta, t0)
-    if not row["ok"]:
-        return row
+        row = _row("speed", fast_audio, fast_meta, t0)
+        if not row["ok"]:
+            return row
+        base_ok, _, base_stats = audio_verdict(base_audio, SAMPLE_RATE)
+        base_s = base_stats.get("duration_s", 0.0)
+        fast_s = row["duration_s"]
+        if not base_ok or base_s <= 0 or fast_s <= 0:
+            row["ok"] = False
+            row["notes"] = f"unusable durations (default={base_s:.2f}s fast={fast_s:.2f}s)"
+            return row
+        ratios.append(fast_s / base_s)
+        detail.append(f"{base_s:.2f}->{fast_s:.2f}={fast_s / base_s:.2f}")
 
-    base_ok, _, base_stats = audio_verdict(base_audio, SAMPLE_RATE)
-    if not base_ok:
-        row["ok"] = False
-        row["notes"] = "default-speed control render failed; cannot compare"
-        return row
-
-    base_s = base_stats.get("duration_s", 0.0)
-    fast_s = row["duration_s"]
-    if base_s <= 0 or fast_s <= 0:
-        row["ok"] = False
-        row["notes"] = f"unusable durations (default={base_s:.2f}s fast={fast_s:.2f}s)"
-        return row
-
-    ratio = fast_s / base_s
-    row["notes"] = f"default={base_s:.2f}s speed{MAX_SPEED}={fast_s:.2f}s ratio={ratio:.2f}"
-    if ratio > 0.95:
+    # MEDIAN, not mean — see the streaming driver's note: with SPEED_SAMPLES=3
+    # the median absorbs one pathological render, which a mean would not.
+    ratio = statistics.median(ratios)
+    mean = sum(ratios) / len(ratios)
+    spread = max(ratios) - min(ratios)
+    row["notes"] = (f"speed{MAX_SPEED} median ratio={ratio:.2f} over {len(ratios)} pairs "
+                    f"(mean={mean:.2f} spread={spread:.2f}; {', '.join(detail)})")
+    if ratio > SPEED_RATIO_GATE:
         row["ok"] = False
         row["notes"] += " — speed accepted but audio not shorter (ignored?)"
     return row
 
 
 def sc_speed_out_of_range(rt, ep, voice):
-    """NEGATIVE control — `speed` outside 0.85–1.15 must be REJECTED, not clamped.
+    """NEGATIVE control — `speed` outside 0.5–1.5 must be REJECTED, not clamped.
 
-    Measured 2026-08-13: `speed=1.3` returns 400 `'speed' must be between 0.85
-    and 1.15.` Clamping instead would silently synthesize at a rate the caller
-    did not ask for, so the rejection is the desirable behavior and worth
-    pinning — it is also what tells us the accepted range, which `speed` above
-    depends on.
+    Clamping instead would silently synthesize at a rate the caller did not ask
+    for, so the rejection is the desirable behavior and worth pinning — it is
+    also what tells us the accepted range, which `speed` above depends on.
+
+    THE PROBE VALUE TRACKS THE DOCUMENTED RANGE, and keeping it stale is not a
+    harmless lag. The 2026-08-31 release widened Flux TTS speed to 0.5–1.5
+    (https://developers.deepgram.com/changelog/2026/8/31), which made the old
+    probe of 1.3 a LEGAL value. On 2026-09-10 this scenario duly failed on a
+    correctly-behaving endpoint and was briefly read as a product regression in
+    a release. OUT_OF_RANGE_SPEED is on a 0.05 increment on purpose, so the
+    rejection it provokes is SPEED_OUT_OF_RANGE and not SPEED_INCREMENT_INVALID
+    — a negative control that can fail for two different reasons is not a
+    control.
     """
     t0 = time.monotonic()
     rejected, detail = False, ""
     try:
-        audio, _ = invoke_batch(rt, ep, "Short probe.", voice, speed=1.3)
+        audio, _ = invoke_batch(rt, ep, "Short probe.", voice, speed=OUT_OF_RANGE_SPEED)
         detail = f"ACCEPTED out-of-range speed, returned {len(audio)}B" if audio else "empty body"
         rejected = not audio
     except Exception as e:  # noqa: BLE001
         rejected = True
-        detail = "must be between 0.85 and 1.15" if "0.85" in str(e) else f"{type(e).__name__}"
+        detail = ("SPEED_OUT_OF_RANGE" if "out_of_range" in str(e).lower()
+                  or "between" in str(e).lower() else f"{type(e).__name__}")
     return {
         "scenario": "speed_out_of_range",
         "ok": rejected,

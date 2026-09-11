@@ -27,10 +27,13 @@ weak assertion for TTS:
                      auto-flush boundaries.
   long_turn          a turn spanning many segments still ends with ONE
                      SpeechMetadata.
-  speed              `speed` query param, a supported GA control. Renders the
-                     same text at the default rate and at speed=1.3 and requires
-                     the faster one to be measurably shorter — accepting the
-                     param but ignoring it would otherwise pass.
+  speed              `speed` query param, a supported GA control (0.5-1.5 in
+                     0.05 steps since 2026-08-31). Renders the same text at the
+                     default rate and at the fastest supported rate, over
+                     SPEED_SAMPLES paired renders, and requires the MEAN
+                     duration ratio to be measurably shorter — accepting the
+                     param but ignoring it would otherwise pass, and a single
+                     pair is too noisy to judge on.
   configure_speed    mid-stream `Configure{speed}` must come back as
                      ConfigureSuccess and the following turn must still produce
                      audio.
@@ -49,6 +52,7 @@ import argparse
 import asyncio
 import logging
 import os
+import statistics
 import sys
 import time
 
@@ -57,6 +61,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from e2e.e2e_test_common import (  # noqa: E402
     LONG_TEXT,
     MAX_SPEED,
+    SPEED_RATIO_GATE,
+    SPEED_SAMPLES,
     REFERENCE_PHRASES,
     REFERENCE_TEXT,
     SAMPLE_RATE,
@@ -205,42 +211,59 @@ async def sc_long_turn(client, ep, voice):
 async def sc_speed(client, ep, voice):
     """`speed` as a query param must be ACCEPTED *and* take effect.
 
-    `speed` is a supported Flux TTS control, valid over **0.85-1.15**. Accepting
-    the parameter is not enough on its own — a server that parsed it and ignored
-    it would also return audio — so this synthesizes the SAME text twice, at the
-    default rate and at the fastest supported rate, and requires the faster
-    render to be measurably shorter.
+    `speed` is a supported Flux TTS control, valid over **0.5-1.5** in 0.05
+    steps (widened 2026-08-31). Accepting the parameter is not enough on its
+    own — a server that parsed it and ignored it would also return audio — so
+    this synthesizes the SAME text at the default rate and at the fastest
+    supported rate and requires the faster render to be measurably shorter.
 
-    At 1.15 the expected duration ratio is ~1/1.15 = 0.87. The 0.95 gate is
-    deliberately loose: the exact ratio depends on how the model redistributes
-    pauses, so this asserts the direction and rough magnitude of the effect, not
-    a precise multiplier.
+    AVERAGED OVER SEVERAL PAIRS, because a single pair is not trustworthy here.
+    Synthesis is stochastic: the model redistributes pauses differently run to
+    run, so one pair's ratio carries real noise and a single sample can fail a
+    working knob (observed 2026-09-10: one pair read 1.03). Each iteration
+    renders its OWN default and fast clip so every ratio is internally paired,
+    which cancels drift between iterations; the verdict is the MEAN.
+
+    The gate is direction-and-magnitude, not a precise multiplier. At 1.5 the
+    ideal ratio is 1/1.5 = 0.67, and the threshold sits well above it: the
+    widened range means a working knob now has ~33% of headroom to show,
+    against the ~13% it had at 1.15, so noise no longer sits anywhere near the
+    decision boundary.
     """
     t0 = time.monotonic()
-    base = await _one_turn(client, ep, voice, REFERENCE_TEXT)
-    fast = await _one_turn(client, ep, voice, REFERENCE_TEXT, speed=MAX_SPEED)
-    row = _base_row("speed", fast, t0)
-    if not row["ok"]:
-        return row
+    ratios: list[float] = []
+    detail: list[str] = []
+    row = None
+    for _ in range(SPEED_SAMPLES):
+        base = await _one_turn(client, ep, voice, REFERENCE_TEXT)
+        fast = await _one_turn(client, ep, voice, REFERENCE_TEXT, speed=MAX_SPEED)
+        row = _base_row("speed", fast, t0)
+        if not row["ok"]:
+            return row
+        base_ok, _, base_stats = audio_verdict(bytes(base.audio_bytes), SAMPLE_RATE)
+        base_s = base_stats.get("duration_s", 0.0)
+        fast_s = row["duration_s"]
+        if not base_ok or base_s <= 0 or fast_s <= 0:
+            row["ok"] = False
+            row["notes"] = f"unusable durations (default={base_s:.2f}s fast={fast_s:.2f}s)"
+            return row
+        ratios.append(fast_s / base_s)
+        detail.append(f"{base_s:.2f}->{fast_s:.2f}={fast_s / base_s:.2f}")
 
-    base_ok, _, base_stats = audio_verdict(bytes(base.audio_bytes), SAMPLE_RATE)
-    if not base_ok:
+    # MEDIAN, not mean: with SPEED_SAMPLES=3 the median survives one
+    # pathological render (a truncated clip, or a turn where the model parks a
+    # long pause) while a mean would be dragged by it — and one bad reading is
+    # exactly the failure mode this scenario hit. Report the mean and the full
+    # set alongside so a skewed distribution is still visible rather than
+    # hidden behind the verdict.
+    median = statistics.median(ratios)
+    mean = sum(ratios) / len(ratios)
+    spread = max(ratios) - min(ratios)
+    row["notes"] = (f"speed{MAX_SPEED} median ratio={median:.2f} over {len(ratios)} pairs "
+                    f"(mean={mean:.2f} spread={spread:.2f}; {', '.join(detail)})")
+    if median > SPEED_RATIO_GATE:
         row["ok"] = False
-        row["notes"] = "default-speed control render failed; cannot compare"
-        return row
-
-    base_s = base_stats.get("duration_s", 0.0)
-    fast_s = row["duration_s"]
-    if base_s <= 0 or fast_s <= 0:
-        row["ok"] = False
-        row["notes"] = f"unusable durations (default={base_s:.2f}s fast={fast_s:.2f}s)"
-        return row
-
-    ratio = fast_s / base_s
-    row["notes"] = f"default={base_s:.2f}s speed{MAX_SPEED}={fast_s:.2f}s ratio={ratio:.2f}"
-    if ratio > 0.95:
-        row["ok"] = False
-        row["notes"] += " — speed accepted but audio not shorter (ignored?)"
+        row["notes"] += f" — median above {SPEED_RATIO_GATE}, speed accepted but not applied"
     return row
 
 

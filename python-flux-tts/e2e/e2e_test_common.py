@@ -29,12 +29,47 @@ ENCODING = "linear16"
 # looks like a pass.
 SILENCE_RMS_FLOOR = 150.0
 
-# Supported `speed` range for Flux TTS. Measured 2026-08-13: a value outside this
-# is a 400 ("'speed' must be between 0.85 and 1.15."), not a clamp. MAX_SPEED is
-# what the speed scenarios use, since the largest legal value gives the clearest
-# duration signal.
-MIN_SPEED = 0.85
-MAX_SPEED = 1.15
+# Supported `speed` range for Flux TTS: 0.5-1.5 in 0.05 increments, WIDENED from
+# 0.85-1.15 by the 2026-08-31 release
+# (https://developers.deepgram.com/changelog/2026/8/31). Every previously
+# accepted value still works, so this is a pure widening. Applies to the WS
+# streaming endpoint, the batch REST endpoint and Voice Agent `provider.version`
+# v2 alike. Aura is a DIFFERENT range (0.7-1.5) and was not changed — do not
+# reuse these constants for aura-2.
+#
+# Two distinct rejections, worth keeping apart when reading a failure:
+#   SPEED_OUT_OF_RANGE      outside 0.5-1.5
+#   SPEED_INCREMENT_INVALID inside the range but not a multiple of 0.05
+#
+# Keeping this stale cost a real false positive: the pre-widening test probed
+# 1.3 as "out of range", and when the endpoint (correctly) accepted it the
+# suite reported a product bug that did not exist.
+MIN_SPEED = 0.5
+MAX_SPEED = 1.5
+SPEED_INCREMENT = 0.05
+# Outside the range AND on-increment, so it provokes SPEED_OUT_OF_RANGE rather
+# than SPEED_INCREMENT_INVALID — the negative control has to test one thing.
+OUT_OF_RANGE_SPEED = 1.75
+# Inside the range but off-increment, for the increment check.
+OFF_INCREMENT_SPEED = 1.07
+
+# The speed scenarios take this many PAIRED renders (each pair is its own
+# default + fast clip, so ratios are internally paired and drift between
+# iterations cancels) and judge the MEDIAN. Synthesis is stochastic — the model
+# redistributes pauses differently each run — so one pair is not a verdict: a
+# single sample read 1.03 on 2026-09-10 and was briefly taken for a broken
+# speed control.
+#
+# Odd count on purpose, so the median is a real sample rather than an average
+# of the middle two. Three tolerates ONE pathological render, which is the
+# observed failure mode; raise to 5 if two-outlier runs ever show up, at the
+# cost of 2 more synthesis round-trips per scenario.
+SPEED_SAMPLES = 3
+# Median-ratio gate. The ideal at MAX_SPEED=1.5 is 1/1.5 = 0.67; 0.85 leaves a
+# wide buffer for prosodic variance while still sitting far below 1.0, which is
+# what "the knob did nothing" looks like. Tightening toward 0.67 would start
+# testing the model's pause distribution rather than whether speed works.
+SPEED_RATIO_GATE = 0.85
 
 # ---------------------------------------------------------------------------
 # Test text

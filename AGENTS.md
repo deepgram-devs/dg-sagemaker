@@ -73,8 +73,8 @@ timeout; the others fit easily in a single agent turn.
 | `python-stt/e2e/e2e_test_batch.py` | ~1 min | summarize/topics scenarios ~4 s | 22 scenarios, mostly 1–2 s each. Safe to run inline. |
 | `python-tts/e2e/e2e_test_batch.py` | ~1.5 min | speed_duration ~12 s | 20 scenarios. Safe inline. |
 | `python-tts/e2e/e2e_test_streaming.py` | ~1.5 min | multi_phrase_flush ~17 s | 8 scenarios. Safe inline. |
-| `python-flux-tts/e2e/e2e_test_batch.py` | ~2 min | `concurrent_5`, `speed` | 7 scenarios. Safe inline. |
-| `python-flux-tts/e2e/e2e_test_streaming.py` | ~3 min | `speed`, `long_turn` | 10 scenarios. `speed` renders the same text twice (default + 1.3) to compare durations, so it costs two turns. Safe inline. |
+| `python-flux-tts/e2e/e2e_test_batch.py` | ~3 min | `speed`, `concurrent_5` | 7 scenarios. Safe inline. |
+| `python-flux-tts/e2e/e2e_test_streaming.py` | ~4 min | `speed` ~60 s, `long_turn` | 10 scenarios. `speed` renders the same text at the default rate and at `MAX_SPEED` and compares durations — `SPEED_SAMPLES` (3) paired renders, judged on the MEDIAN, so it costs SIX turns not two. Synthesis is stochastic and a single pair is not a verdict. Safe inline. |
 
 Wall-clocks measured against single-GPU (STT, Flux TTS) and multi-GPU (Aura-2
 TTS) SageMaker endpoints. Network and instance class shift the numbers, but the
