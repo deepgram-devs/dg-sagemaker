@@ -23,7 +23,12 @@ goes `Failed` with `Request to service failed` and no container log, typically
 4. **Never include a type the product does not support**: `g4dn` for Flux,
    `g5`/`g4dn` for Flux TTS, any single-GPU type for Aura-2. `deploy_endpoint.py`
    checks the pool against the package's `SupportedRealtimeInferenceInstanceTypes`.
-5. **Up to 5 types.** Three is the sweet spot.
+5. **Use all five slots.** SageMaker allows at most five pool members; the
+   `default_pool` for each family fills them (or lists every supported type when
+   fewer exist), because GPU capacity shortages were the dominant deploy
+   failure in testing and each extra rung is another chance to land. The
+   script removes rungs the package version does not list and rungs with zero
+   or exhausted quota, so the pool shrinks safely per region.
 6. **Per-rung timeout.** SageMaker tries each rung for
    `VariantInstanceProvisionTimeoutInSeconds` before moving to the next;
    `deploy_endpoint.py --rung-timeout-s` sets it (default 300, AWS allows
@@ -36,12 +41,16 @@ goes `Failed` with `Request to service failed` and no container log, typically
 
 Default pools per product family (`default_pool` in `products.json`):
 
-| Family | Default pool |
+| Family | Default pool (priority order) |
 |---|---|
-| Nova-3 | `ml.g6.2xlarge`, `ml.g6e.2xlarge`, `ml.g5.2xlarge` |
-| Flux | `ml.g6.2xlarge`, `ml.g6e.2xlarge`, `ml.g5.2xlarge` |
-| Aura-2 | `ml.g6.12xlarge`, `ml.g6e.12xlarge`, `ml.g5.12xlarge` |
-| Flux TTS | `ml.g6e.2xlarge`, `ml.g6.2xlarge`, `ml.g7e.2xlarge` |
+| Nova-3 | `ml.g6.2xlarge`, `ml.g6e.2xlarge`, `ml.g5.2xlarge`, `ml.g4dn.2xlarge`, `ml.g7.2xlarge` |
+| Flux | `ml.g6.2xlarge`, `ml.g6e.2xlarge`, `ml.g5.2xlarge`, `ml.g7.2xlarge`, `ml.g7e.2xlarge` |
+| Aura-2 | `ml.g6.12xlarge`, `ml.g6e.12xlarge`, `ml.g5.12xlarge`, `ml.g4dn.12xlarge`, `ml.g7.12xlarge` |
+| Flux TTS | `ml.g6e.2xlarge`, `ml.g6.2xlarge`, `ml.g7.2xlarge`, `ml.g7e.2xlarge` (all four supported types) |
+
+Nova-3 and Aura-2 support six types; the fifth slot goes to `g7` over `g7e`
+because `g7e` quota is the one most often still at 0. Swap it in if your
+account has `g7e` quota and no `g4dn`.
 
 ## Quota does not fall back — capacity does
 

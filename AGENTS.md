@@ -264,8 +264,9 @@ for a planning estimate. Capacity varies several-fold with request features, so
 a published number is wrong for most customers and becomes a support burden.
 
 **Capacity guidance the skill gives.** Instance pools are the default
-recommendation (`--instance-pools default` → the product's `default_pool`,
-recommended type first); a single `--instance-type` needs
+recommendation (`--instance-pools default` → the product's `default_pool`:
+five types, SageMaker's maximum, recommended type first — or all supported
+types when fewer exist); a single `--instance-type` needs
 `--single-type-reason`. `deploy_endpoint.py` drops zero-quota rungs itself.
 Rationale and ordering rules live in `references/instance-pools.md`; keep the
 scripts, `products.json` and that page in agreement.

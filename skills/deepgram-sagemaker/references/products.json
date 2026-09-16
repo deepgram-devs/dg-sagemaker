@@ -1,5 +1,5 @@
 {
-  "catalog_version": "2026-09-16.2",
+  "catalog_version": "2026-09-16.3",
   "seller_profile_id": "6efa21f9-9a33-4cae-ba44-756436fa71dd",
   "marketplace_search_url": "https://aws.amazon.com/marketplace/search/results?searchTerms=deepgram&CREATOR=6efa21f9-9a33-4cae-ba44-756436fa71dd&FULFILLMENT_OPTION_TYPE=SAGEMAKER_MODEL&filters=CREATOR%2CFULFILLMENT_OPTION_TYPE",
   "manage_subscriptions_url": "https://us-east-1.console.aws.amazon.com/marketplace/subscriptions",
@@ -18,7 +18,9 @@
       "default_pool": [
         "ml.g6.2xlarge",
         "ml.g6e.2xlarge",
-        "ml.g5.2xlarge"
+        "ml.g5.2xlarge",
+        "ml.g4dn.2xlarge",
+        "ml.g7.2xlarge"
       ],
       "supported": [
         "ml.g6.2xlarge",
@@ -35,7 +37,9 @@
       "default_pool": [
         "ml.g6.2xlarge",
         "ml.g6e.2xlarge",
-        "ml.g5.2xlarge"
+        "ml.g5.2xlarge",
+        "ml.g7.2xlarge",
+        "ml.g7e.2xlarge"
       ],
       "supported": [
         "ml.g6.2xlarge",
@@ -54,7 +58,9 @@
       "default_pool": [
         "ml.g6.12xlarge",
         "ml.g6e.12xlarge",
-        "ml.g5.12xlarge"
+        "ml.g5.12xlarge",
+        "ml.g4dn.12xlarge",
+        "ml.g7.12xlarge"
       ],
       "supported": [
         "ml.g6.12xlarge",
@@ -75,6 +81,7 @@
       "default_pool": [
         "ml.g6e.2xlarge",
         "ml.g6.2xlarge",
+        "ml.g7.2xlarge",
         "ml.g7e.2xlarge"
       ],
       "supported": [
@@ -309,7 +316,7 @@
       ]
     }
   ],
-  "instance_pools_guidance": "Deploy with an ordered pool (default_pool) rather than one type: SageMaker falls back to the next type when the first has no capacity. Priority 1 = recommended type; then same-or-newer generation with similar per-instance capacity; older generations last as insurance. Every type in the pool needs quota >= 1 (quota does not fall back). See references/instance-pools.md.",
+  "instance_pools_guidance": "Deploy with the ordered default_pool (five types, SageMaker's maximum, or every supported type when fewer exist) rather than one type: SageMaker falls back to the next type when one has no capacity, and GPU capacity shortages were the dominant deploy failure in testing. Priority 1 = recommended type; then same-or-newer generation with similar per-instance capacity; then older generations (often the most available). deploy_endpoint.py drops types the package version does not list and types with zero or exhausted quota. See references/instance-pools.md.",
   "async_endpoints": {
     "supported": false,
     "note": "Asynchronous inference (AsyncInferenceConfig / InvokeEndpointAsync) is temporarily not supported for Marketplace-hosted Deepgram endpoints. If you have an async use case, reach out to a Deepgram representative. The scripts refuse --async-bucket / --mode async."
