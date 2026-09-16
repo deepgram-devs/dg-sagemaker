@@ -5,6 +5,6 @@ description = "Deepgram SageMaker Flux TTS (/v2/speak) e2e + stress client"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "aws-sdk-sagemaker-runtime-http2",
+    "aws-sdk-sagemaker-runtime-http2[awscrt]>=0.11",
     "boto3>=1.42.34",
 ]

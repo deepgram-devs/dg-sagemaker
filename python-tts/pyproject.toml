@@ -5,7 +5,7 @@ description = "Deepgram SageMaker Text-to-Speech streaming stress test client"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "aws-sdk-sagemaker-runtime-http2",
+    "aws-sdk-sagemaker-runtime-http2[awscrt]>=0.11",
     "boto3>=1.42.34",
     "pyaudio>=0.2.14",
 ]

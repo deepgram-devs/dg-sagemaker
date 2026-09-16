@@ -18,15 +18,57 @@ from queue import Queue
 from urllib.parse import quote
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError
-from aws_sdk_sagemaker_runtime_http2.client import SageMakerRuntimeHTTP2Client
-from aws_sdk_sagemaker_runtime_http2.config import Config, HTTPAuthSchemeResolver
+from aws_sdk_sagemaker_runtime_http2.client import AsyncSageMakerRuntimeHTTP2Client
 from aws_sdk_sagemaker_runtime_http2.models import (
     InvokeEndpointWithBidirectionalStreamInput,
     RequestStreamEventPayloadPart,
     RequestPayloadPart
 )
 from smithy_aws_core.identity import EnvironmentCredentialsResolver
-from smithy_aws_core.auth.sigv4 import SigV4AuthScheme
+from smithy_http.aio.crt import AWSCRTHTTPClient
+
+
+def _bidi_client(endpoint_uri: str, region: str, transport=None) -> AsyncSageMakerRuntimeHTTP2Client:
+    """HTTP/2 SageMaker runtime client (aws-sdk-sagemaker-runtime-http2 >= 0.11).
+
+    0.11 replaced the old `Config(...)`-constructed client with a config that
+    must be resolved asynchronously. A client-level plugin keeps construction
+    synchronous: the client resolves its defaults on first use and the plugin
+    then pins the endpoint URI (port 8443 is mandatory for the bidirectional
+    stream), the region, the credentials (read from the environment; callers
+    export them first) and the AWS CRT HTTP/2 transport (the default aiohttp
+    transport cannot carry the bidirectional stream).
+    """
+    def plugin(cfg):
+        cfg.endpoint_uri = endpoint_uri
+        cfg.region = region
+        cfg.aws_credentials_identity_resolver = EnvironmentCredentialsResolver()
+        cfg.transport = transport or AWSCRTHTTPClient()
+    return AsyncSageMakerRuntimeHTTP2Client(plugins=[plugin])
+    # Callers create ONE of these per stream. Several bidirectional streams
+    # multiplexed on a single CRT HTTP/2 connection starve each other: later
+    # streams never connect and earlier ones stop flowing until the server drops
+    # them with INACTIVE_CLIENT (observed 2026-09-16, ramp_10x_step5).
+
+
+def _event_payload(result) -> bytes | None:
+    """Payload bytes of one response event, or None when there is nothing to handle.
+
+    0.11 delivers server-side stream failures as typed events
+    (`ResponseStreamEventModelStreamError`, `...InternalStreamFailure`) whose
+    `value` has no `bytes_`. Those are turned into a Deepgram-style
+    `{"type": "Error", ...}` message so the existing handlers record them as
+    endpoint errors instead of tripping on a missing attribute.
+    """
+    value = getattr(result, "value", None)
+    if value is None:
+        return None
+    if hasattr(value, "bytes_"):
+        return value.bytes_ or None
+    msg = getattr(value, "message", None) or repr(value)
+    code = getattr(value, "error_code", None)
+    return json.dumps({"type": "Error", "error": f"{type(result).__name__}: {msg}"
+                       + (f" (error_code={code})" if code else "")}).encode("utf-8")
 
 try:
     import pyaudio
@@ -177,8 +219,8 @@ class DeepgramSageMakerConnection:
                     logger.debug(f"[Connection {self.connection_id}] No more responses from server")
                     break
 
-                if result.value and result.value.bytes_:
-                    response_data = result.value.bytes_.decode('utf-8')
+                if (payload := _event_payload(result)):
+                    response_data = payload.decode('utf-8')
 
                     try:
                         # Parse JSON response from Deepgram
@@ -212,9 +254,9 @@ class DeepgramSageMakerConnection:
                     if result is None:
                         break
 
-                    if result.value and result.value.bytes_:
+                    if (payload := _event_payload(result)):
                         remaining_count += 1
-                        response_data = result.value.bytes_.decode('utf-8')
+                        response_data = payload.decode('utf-8')
                         try:
                             parsed = json.loads(response_data)
                             if 'channel' in parsed:
@@ -370,14 +412,7 @@ class MultiConnectionMicrophoneClient:
         logger.debug(f"Using SageMaker endpoint: {self.bidi_endpoint}")
         logger.debug(f"Region: {self.region}")
 
-        config = Config(
-            endpoint_uri=self.bidi_endpoint,
-            region=self.region,
-            aws_credentials_identity_resolver=EnvironmentCredentialsResolver(),
-            auth_scheme_resolver=HTTPAuthSchemeResolver(),
-            auth_schemes={"aws.auth#sigv4": SigV4AuthScheme(service="sagemaker")}
-        )
-        self.client = SageMakerRuntimeHTTP2Client(config=config)
+        self.client = _bidi_client(self.bidi_endpoint, self.region)
         logger.info("SageMaker client initialized successfully")
 
     async def initialize_connections(self, model="nova-3", language="en", **kwargs):
@@ -396,7 +431,7 @@ class MultiConnectionMicrophoneClient:
 
         # Create all connections
         for i in range(self.num_connections):
-            conn = DeepgramSageMakerConnection(i + 1, self.client, self.endpoint_name)
+            conn = DeepgramSageMakerConnection(i + 1, _bidi_client(self.bidi_endpoint, self.region), self.endpoint_name)
             self.connections.append(conn)
 
         # Start all sessions in parallel

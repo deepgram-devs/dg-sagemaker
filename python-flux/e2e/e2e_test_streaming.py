@@ -447,8 +447,13 @@ def run_scenario(
     start = time.monotonic()
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
         elapsed = time.monotonic() - start
+        # Keep whatever the driver printed before the kill — without it a hung
+        # scenario leaves no evidence at all (observed 2026-09-16: ramp_10x_step5
+        # timed out with no stdout/stderr files to read).
+        stdout_path.write_text((e.stdout or "") if isinstance(e.stdout, str) else (e.stdout or b"").decode(errors="replace"))
+        stderr_path.write_text((e.stderr or "") if isinstance(e.stderr, str) else (e.stderr or b"").decode(errors="replace"))
         return {
             "scenario": scenario.name, "ok": False, "wer": 1.0, "sdi": (0, 0, 0),
             "words": 0, "elapsed_s": elapsed,

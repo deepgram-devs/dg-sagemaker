@@ -498,6 +498,9 @@ def run_scenario(
         )
     except subprocess.TimeoutExpired as e:
         elapsed = time.monotonic() - start
+        # Keep whatever the driver printed before the kill so a hung scenario leaves evidence.
+        stdout_path.write_text((e.stdout or "") if isinstance(e.stdout, str) else (e.stdout or b"").decode(errors="replace"))
+        stderr_path.write_text((e.stderr or "") if isinstance(e.stderr, str) else (e.stderr or b"").decode(errors="replace"))
         return {
             "scenario": scenario.name,
             "ok": False,

@@ -35,18 +35,55 @@ from collections import Counter, deque
 from urllib.parse import quote
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
-from aws_sdk_sagemaker_runtime_http2.client import SageMakerRuntimeHTTP2Client
-from aws_sdk_sagemaker_runtime_http2.config import Config, HTTPAuthSchemeResolver
+from aws_sdk_sagemaker_runtime_http2.client import AsyncSageMakerRuntimeHTTP2Client
 from aws_sdk_sagemaker_runtime_http2.models import (
     InvokeEndpointWithBidirectionalStreamInput,
     RequestStreamEventPayloadPart,
     RequestPayloadPart
 )
 from smithy_aws_core.identity import EnvironmentCredentialsResolver
-from smithy_aws_core.auth.sigv4 import SigV4AuthScheme
 from smithy_http.aio.crt import AWSCRTHTTPClient, _AWSCRTEventLoop
 import awscrt.io as crt_io
 from botocore.config import Config as BotoConfig
+
+
+def _bidi_client(endpoint_uri: str, region: str, transport=None) -> AsyncSageMakerRuntimeHTTP2Client:
+    """HTTP/2 SageMaker runtime client (aws-sdk-sagemaker-runtime-http2 >= 0.11).
+
+    0.11 replaced the old `Config(...)`-constructed client with a config that
+    must be resolved asynchronously. A client-level plugin keeps construction
+    synchronous: the client resolves its defaults on first use and the plugin
+    then pins the endpoint URI (port 8443 is mandatory for the bidirectional
+    stream), the region, the credentials (read from the environment; callers
+    export them first) and the AWS CRT HTTP/2 transport (the default aiohttp
+    transport cannot carry the bidirectional stream).
+    """
+    def plugin(cfg):
+        cfg.endpoint_uri = endpoint_uri
+        cfg.region = region
+        cfg.aws_credentials_identity_resolver = EnvironmentCredentialsResolver()
+        cfg.transport = transport or AWSCRTHTTPClient()
+    return AsyncSageMakerRuntimeHTTP2Client(plugins=[plugin])
+
+
+def _event_payload(result) -> bytes | None:
+    """Payload bytes of one response event, or None when there is nothing to handle.
+
+    0.11 delivers server-side stream failures as typed events
+    (`ResponseStreamEventModelStreamError`, `...InternalStreamFailure`) whose
+    `value` has no `bytes_`. Those are turned into a Deepgram-style
+    `{"type": "Error", ...}` message so the existing handlers record them as
+    endpoint errors instead of tripping on a missing attribute.
+    """
+    value = getattr(result, "value", None)
+    if value is None:
+        return None
+    if hasattr(value, "bytes_"):
+        return value.bytes_ or None
+    msg = getattr(value, "message", None) or repr(value)
+    code = getattr(value, "error_code", None)
+    return json.dumps({"type": "Error", "error": f"{type(result).__name__}: {msg}"
+                       + (f" (error_code={code})" if code else "")}).encode("utf-8")
 
 # Configuration constants
 DEFAULT_REGION = "us-east-2"
@@ -426,9 +463,9 @@ class DeepgramSageMakerConnection:
                         f"finals={self.transcript_count}, interims={self.interim_count})"
                     )
                     break
-                if result.value and result.value.bytes_:
+                if (payload := _event_payload(result)):
                     self.last_recv_at = time.monotonic()
-                    self._handle_response(result.value.bytes_.decode('utf-8'))
+                    self._handle_response(payload.decode('utf-8'))
 
 
         except Exception as e:
@@ -709,19 +746,11 @@ class MultiConnectionWAVClient:
     # triggering Deepgram's 12-second idle timeout (NET-0001).
     _MAX_STREAMS_PER_CONNECTION = 1
 
-    def _create_one_client(self, eventloop: _AWSCRTEventLoop) -> SageMakerRuntimeHTTP2Client:
+    def _create_one_client(self, eventloop: _AWSCRTEventLoop) -> AsyncSageMakerRuntimeHTTP2Client:
         """Create a single SageMaker HTTP/2 client with its own CRT transport."""
         transport = AWSCRTHTTPClient(eventloop=eventloop)
 
-        config = Config(
-            endpoint_uri=self.bidi_endpoint,
-            region=self.region,
-            aws_credentials_identity_resolver=EnvironmentCredentialsResolver(),
-            auth_scheme_resolver=HTTPAuthSchemeResolver(),
-            auth_schemes={"aws.auth#sigv4": SigV4AuthScheme(service="sagemaker")},
-            transport=transport,
-        )
-        return SageMakerRuntimeHTTP2Client(config=config)
+        return _bidi_client(self.bidi_endpoint, self.region, transport=transport)
 
     def _initialize_clients(self):
         """Prepare the shared CRT event loop and credential environment.
@@ -743,7 +772,7 @@ class MultiConnectionWAVClient:
             f"(clients created lazily, 1 per connection)"
         )
 
-    def _get_client(self, connection_index: int) -> SageMakerRuntimeHTTP2Client:
+    def _get_client(self, connection_index: int) -> AsyncSageMakerRuntimeHTTP2Client:
         """Return a client for the given connection, creating it lazily."""
         # With _MAX_STREAMS_PER_CONNECTION = 1, each connection gets
         # its own client.  Reuse clients when the ratio allows sharing.

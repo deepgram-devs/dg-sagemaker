@@ -99,9 +99,11 @@ async def main():
 
 asyncio.run(main())
 ```
-Versions before 0.11 exposed `SageMakerRuntimeHTTP2Client` + `Config` with an
-`EnvironmentCredentialsResolver`; the repository's older drivers still use that
-shape. Both generations surface a pre-upgrade rejection as a 424 `ModelError`.
+Versions before 0.11 exposed `SageMakerRuntimeHTTP2Client` + `Config`; the
+repository's drivers (`python-stt`, `python-flux`, `python-tts`,
+`python-flux-tts`) show the 0.11 shape with a client plugin, which keeps
+construction synchronous. Both generations surface a pre-upgrade rejection as
+a 424 `ModelError`.
 
 Messages: Nova-3 → `Results` with `channel.alternatives[0].transcript`, `is_final`,
 `speech_final`. Flux → `TurnInfo` with `event` ∈ `Update | StartOfTurn |

@@ -191,8 +191,8 @@ def default_scenarios(language: str, voice_coverage_n: int = 3) -> list[TTSStrea
             name="voice_wrong_language",
             description=f"voice={alt.model} ({alt.language}) — expected to error on a {language}-only bundle",
             voice=alt.model,
-            tolerated_error_substring="Flushed-ack timeout",
-            notes=f"monolingual-bundle negative; PASS-WITH-NOTE on '{alt.language}' voice rejection (manifests as no-audio + flush timeout)",
+            tolerated_error_substring="Flushed-ack timeout|Failed to establish WebSocket connection",
+            notes=f"monolingual-bundle negative; PASS-WITH-NOTE on '{alt.language}' voice rejection (handshake 424 on current endpoints; older ones: no-audio + flush timeout)",
         ))
 
     return scenarios
@@ -271,8 +271,11 @@ def run_scenario(
     start = time.monotonic()
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=subprocess_timeout_s)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
         elapsed = time.monotonic() - start
+        # Keep whatever the driver printed before the kill so a hung scenario leaves evidence.
+        stdout_path.write_text((e.stdout or "") if isinstance(e.stdout, str) else (e.stdout or b"").decode(errors="replace"))
+        stderr_path.write_text((e.stderr or "") if isinstance(e.stderr, str) else (e.stderr or b"").decode(errors="replace"))
         return _row(scenario, False, elapsed, [f"subprocess timed out after {subprocess_timeout_s}s"],
                     error="timeout")
     elapsed = time.monotonic() - start
@@ -294,7 +297,9 @@ def run_scenario(
     ).lower()
 
     # Tolerated deployment gap (e.g. voice/encoding not bundled).
-    if scenario.tolerated_error_substring and errored and scenario.tolerated_error_substring.lower() in all_error_text:
+    # `tolerated_error_substring` may list alternatives separated by "|" (any match tolerates).
+    tolerated = [t.strip().lower() for t in (scenario.tolerated_error_substring or "").split("|") if t.strip()]
+    if tolerated and errored and any(t in all_error_text for t in tolerated):
         return _row(scenario, True, elapsed,
                     [f"DEPLOYMENT-GAP: '{scenario.tolerated_error_substring}' — pass-with-note"])
 

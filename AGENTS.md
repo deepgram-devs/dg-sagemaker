@@ -160,6 +160,25 @@ multi` before concluding the listing is broken. (Monolingual listings use the
 specific code; Flux multilingual is selected by model name
 `--model flux-general-multi`, not a language param.)
 
+## One HTTP/2 client per bidirectional stream
+
+Every driver opens each stream on its own `aws-sdk-sagemaker-runtime-http2`
+client (own CRT connection): `_bidi_client(...)` per connection in
+`python-stt`, `python-flux`, `python-tts`, `python-stt/stt_microphone_stress.py`,
+and `PerStreamClient` in `python-flux-tts`. Do not "optimise" this back to a
+shared client. Several streams multiplexed on one connection starve each
+other — measured 2026-09-16 on `ramp_10x_step5` (10 conns in two batches):
+only 1 of the second batch connected, the first batch stopped flowing and the
+server closed them with `INACTIVE_CLIENT` after 60 s, and the flux-tts
+`concurrent_5` scenario hung for 25 min. With per-stream clients the same
+scenarios pass in ~45 s / 13 s.
+
+Session-start rejections (HTTP 424 `Failed to establish WebSocket connection`,
+the container's 400 body is not forwarded) are recorded on the connection's
+`error_messages` rather than allowed to escape `asyncio.gather()`, so negative
+scenarios can tolerate them; the e2e runners also keep the driver's
+stdout/stderr when a scenario times out.
+
 ## Pass/fail parsing
 
 The final block is always:
@@ -209,10 +228,13 @@ in `scripts/_common.py`):
 - **Dependencies** — PEP 723 inline metadata (`# /// script`), run with `uv run`;
   no shared venv. Keep `boto3>=1.43.49` (marketplace-discovery service model,
   `MetricsConfig.EnableDetailedObservability`). `invoke_test.py` uses
-  `aws-sdk-sagemaker-runtime-http2[awscrt]>=0.11` — the 0.11 API
-  (`AsyncSageMakerRuntimeHTTP2Client`, `await ...Config.resolve(...)`, typed
-  `ModelStreamError` events) differs from the 0.6 API the older `python-*`
-  drivers use; do not copy client code between them without porting.
+  `aws-sdk-sagemaker-runtime-http2[awscrt]>=0.11`, as do the `python-*`
+  drivers (ported 2026-09-16). The 0.11 API: `AsyncSageMakerRuntimeHTTP2Client`,
+  config via `await ...Config.resolve(...)` or client `plugins=[...]` (the
+  drivers use a plugin so construction stays synchronous — see `_bidi_client`
+  in each), the `[awscrt]` extra for the HTTP/2 transport, and typed error
+  events (`ResponseStreamEventModelStreamError`) which `_event_payload` folds
+  into a Deepgram-style `Error` message.
 - **Asynchronous endpoints** are temporarily not supported for Marketplace-hosted
   Deepgram: `deploy_endpoint.py` refuses `--async-bucket` and the references say
   to contact a Deepgram representative. Re-enable in `products.json`

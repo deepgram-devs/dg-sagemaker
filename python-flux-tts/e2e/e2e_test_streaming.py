@@ -74,6 +74,7 @@ from e2e.e2e_test_common import (  # noqa: E402
 from flux_tts_client import (  # noqa: E402
     DEFAULT_VOICE,
     FluxTtsStream,
+    PerStreamClient,
     ensure_env_credentials,
     bidi_endpoint_uri,
     make_client,
@@ -454,7 +455,7 @@ SCENARIOS = {
 
 async def main_async(args) -> int:
     ensure_env_credentials(args.region)
-    client = make_client(args.region, args.fips)
+    client = PerStreamClient(args.region, args.fips)   # one HTTP/2 connection per stream
     # Printed, not asserted — the log is the proof of which endpoint was used.
     print(f"Bidi URL:    {bidi_endpoint_uri(args.region, args.fips)}")
     print(f"FIPS:        {'yes (--fips)' if args.fips else 'no'}")

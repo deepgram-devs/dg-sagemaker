@@ -25,15 +25,57 @@ from queue import Queue
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
-from aws_sdk_sagemaker_runtime_http2.client import SageMakerRuntimeHTTP2Client
-from aws_sdk_sagemaker_runtime_http2.config import Config, HTTPAuthSchemeResolver
+from aws_sdk_sagemaker_runtime_http2.client import AsyncSageMakerRuntimeHTTP2Client
 from aws_sdk_sagemaker_runtime_http2.models import (
     InvokeEndpointWithBidirectionalStreamInput,
     RequestStreamEventPayloadPart,
     RequestPayloadPart
 )
 from smithy_aws_core.identity import EnvironmentCredentialsResolver
-from smithy_aws_core.auth.sigv4 import SigV4AuthScheme
+from smithy_http.aio.crt import AWSCRTHTTPClient
+
+
+def _bidi_client(endpoint_uri: str, region: str, transport=None) -> AsyncSageMakerRuntimeHTTP2Client:
+    """HTTP/2 SageMaker runtime client (aws-sdk-sagemaker-runtime-http2 >= 0.11).
+
+    0.11 replaced the old `Config(...)`-constructed client with a config that
+    must be resolved asynchronously. A client-level plugin keeps construction
+    synchronous: the client resolves its defaults on first use and the plugin
+    then pins the endpoint URI (port 8443 is mandatory for the bidirectional
+    stream), the region, the credentials (read from the environment; callers
+    export them first) and the AWS CRT HTTP/2 transport (the default aiohttp
+    transport cannot carry the bidirectional stream).
+    """
+    def plugin(cfg):
+        cfg.endpoint_uri = endpoint_uri
+        cfg.region = region
+        cfg.aws_credentials_identity_resolver = EnvironmentCredentialsResolver()
+        cfg.transport = transport or AWSCRTHTTPClient()
+    return AsyncSageMakerRuntimeHTTP2Client(plugins=[plugin])
+    # Callers create ONE of these per stream. Several bidirectional streams
+    # multiplexed on a single CRT HTTP/2 connection starve each other: later
+    # streams never connect and earlier ones stop flowing until the server drops
+    # them with INACTIVE_CLIENT (observed 2026-09-16, ramp_10x_step5).
+
+
+def _event_payload(result) -> bytes | None:
+    """Payload bytes of one response event, or None when there is nothing to handle.
+
+    0.11 delivers server-side stream failures as typed events
+    (`ResponseStreamEventModelStreamError`, `...InternalStreamFailure`) whose
+    `value` has no `bytes_`. Those are turned into a Deepgram-style
+    `{"type": "Error", ...}` message so the existing handlers record them as
+    endpoint errors instead of tripping on a missing attribute.
+    """
+    value = getattr(result, "value", None)
+    if value is None:
+        return None
+    if hasattr(value, "bytes_"):
+        return value.bytes_ or None
+    msg = getattr(value, "message", None) or repr(value)
+    code = getattr(value, "error_code", None)
+    return json.dumps({"type": "Error", "error": f"{type(result).__name__}: {msg}"
+                       + (f" (error_code={code})" if code else "")}).encode("utf-8")
 
 # pyaudio is only needed for local speaker playback. The e2e drivers run this
 # client headless (--no-playback), so import it lazily and degrade gracefully
@@ -136,12 +178,24 @@ class DeepgramSageMakerTTSConnection:
         )
 
         logger.debug(f"[Connection {self.connection_id}] Invoking endpoint with bidirectional stream")
-        self.stream = await self.client.invoke_endpoint_with_bidirectional_stream(stream_input)
-        self.is_active = True
+        try:
+            self.stream = await self.client.invoke_endpoint_with_bidirectional_stream(stream_input)
+            self.is_active = True
 
-        logger.debug(f"[Connection {self.connection_id}] Stream created, connecting to output stream")
-        # Get output stream immediately before starting background task
-        output = await self.stream.await_output()
+            logger.debug(f"[Connection {self.connection_id}] Stream created, connecting to output stream")
+            # Get output stream immediately before starting background task
+            output = await self.stream.await_output()
+        except Exception as e:
+            # A request the container rejects before the WebSocket upgrade surfaces here as
+            # ModelError 424 "Failed to establish WebSocket connection" (SageMaker forwards only
+            # the generic status, not the container's 400 body). Record it on the connection so
+            # the per-connection summary — and the e2e verdict — can see it, instead of letting
+            # it escape asyncio.gather() and abort the whole run with an empty summary.
+            self.is_active = False
+            self.errored = True
+            self.error_messages.append(f"session start failed: {e}")
+            logger.error(f"[Connection {self.connection_id}] Session start failed: {e}")
+            return
         self.output_stream = output[1]
         logger.debug(f"[Connection {self.connection_id}] Connected to output stream")
 
@@ -526,8 +580,8 @@ class DeepgramSageMakerTTSConnection:
                 if result is None:
                     logger.debug(f"[Connection {self.connection_id}] No more responses from server")
                     break
-                if result.value and result.value.bytes_:
-                    self._handle_server_data(result.value.bytes_)
+                if (payload := _event_payload(result)):
+                    self._handle_server_data(payload)
 
             # Continue processing any remaining buffered responses after close.
             logger.debug(f"[Connection {self.connection_id}] Processing any remaining buffered responses...")
@@ -537,8 +591,8 @@ class DeepgramSageMakerTTSConnection:
                     result = await asyncio.wait_for(self.output_stream.receive(), timeout=0.5)
                     if result is None:
                         break
-                    if result.value and result.value.bytes_:
-                        if self._handle_server_data(result.value.bytes_):
+                    if (payload := _event_payload(result)):
+                        if self._handle_server_data(payload):
                             remaining_count += 1
                 except asyncio.TimeoutError:
                     break
@@ -787,14 +841,7 @@ class MultiConnectionTTSClient:
         logger.debug(f"Using SageMaker endpoint: {self.bidi_endpoint}")
         logger.debug(f"Region: {self.region}")
 
-        config = Config(
-            endpoint_uri=self.bidi_endpoint,
-            region=self.region,
-            aws_credentials_identity_resolver=EnvironmentCredentialsResolver(),
-            auth_scheme_resolver=HTTPAuthSchemeResolver(),
-            auth_schemes={"aws.auth#sigv4": SigV4AuthScheme(service="sagemaker")}
-        )
-        self.client = SageMakerRuntimeHTTP2Client(config=config)
+        self.client = _bidi_client(self.bidi_endpoint, self.region)
         self._boto_session = session
         logger.info("SageMaker client initialized successfully")
 
@@ -848,7 +895,7 @@ class MultiConnectionTTSClient:
         for i in range(1, self.num_connections + 1):
             should_playback = (i == self.playback_connection_id)
             conn = DeepgramSageMakerTTSConnection(
-                i, self.client, self.endpoint_name,
+                i, _bidi_client(self.bidi_endpoint, self.region), self.endpoint_name,
                 should_playback=should_playback, boto_session=self._boto_session,
                 collect_audio=self.collect_audio,
             )
