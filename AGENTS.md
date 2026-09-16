@@ -174,7 +174,9 @@ server closed them with `INACTIVE_CLIENT` after 60 s, and the flux-tts
 scenarios pass in ~45 s / 13 s.
 
 Session-start rejections (HTTP 424 `Failed to establish WebSocket connection`,
-the container's 400 body is not forwarded) are recorded on the connection's
+the container's 400 body is not forwarded) arrive immediately on client 0.5+
+but only after the input stream is closed on 0.4.x (same-endpoint A/B,
+2026-09-16) — one more reason the drivers pin >= 0.11. They are recorded on the connection's
 `error_messages` rather than allowed to escape `asyncio.gather()`, so negative
 scenarios can tolerate them; the e2e runners also keep the driver's
 stdout/stderr when a scenario times out.

@@ -117,7 +117,9 @@ and costs nothing while idle.
 - Streaming open fails with HTTP 424 "Failed to establish WebSocket connection"
   → the container rejected the request (model/language/path); the real 400 is
   in the endpoint's CloudWatch log (`endpoint_status.py`). A client that hangs
-  with no error instead is almost always missing `:8443` in the URI.
+  with no error instead is missing `:8443` in the URI or is running
+  `aws-sdk-sagemaker-runtime-http2` 0.4.x, which holds the 424 until the input
+  stream closes; upgrade to 0.11.
 - Stuck in Creating → download timeout too low for a large bundle, or capacity.
 - Container never starts, log group absent → provisioning (quota/capacity/AMI),
   not the image. Try `--instance-pools` or another region.

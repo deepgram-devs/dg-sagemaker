@@ -531,8 +531,9 @@ def main() -> int:
                             args.pace, args.timeout_s), timeout=args.timeout_s + 60))
         except asyncio.TimeoutError:
             result["diagnosis"] = ("The stream never opened or never answered within the timeout. Check the endpoint is "
-                                   "InService and the URI includes :8443; a rejected request normally surfaces as a 424 "
-                                   "within seconds, so a silent hang points at connectivity or the port.")
+                                   "InService and the URI includes :8443; a rejected request surfaces as a 424 within "
+                                   "seconds on aws-sdk-sagemaker-runtime-http2 >= 0.6 (0.4.x holds it until the input "
+                                   "stream closes), so a silent hang points at the port, connectivity, or an old client.")
             say(result["diagnosis"])
             rc = EXIT_NEGATIVE
         except Exception as e:  # noqa: BLE001

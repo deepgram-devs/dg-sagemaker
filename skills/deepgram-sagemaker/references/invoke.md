@@ -102,8 +102,8 @@ asyncio.run(main())
 Versions before 0.11 exposed `SageMakerRuntimeHTTP2Client` + `Config`; the
 repository's drivers (`python-stt`, `python-flux`, `python-tts`,
 `python-flux-tts`) show the 0.11 shape with a client plugin, which keeps
-construction synchronous. Both generations surface a pre-upgrade rejection as
-a 424 `ModelError`.
+construction synchronous. 0.6 and later surface a pre-upgrade rejection as a
+424 `ModelError` immediately; 0.4.x only after the input stream is closed.
 
 Messages: Nova-3 → `Results` with `channel.alternatives[0].transcript`, `is_final`,
 `speech_final`. Flux → `TurnInfo` with `event` ∈ `Update | StartOfTurn |
@@ -134,7 +134,9 @@ us-west-2, ca-central-1, GovCloud.
   request before the upgrade (bad model/language/path). SageMaker does not
   forward the container's own 400 text to streaming clients; read it in the
   endpoint's CloudWatch log. A client that instead hangs with no error is
-  almost always missing `:8443` in the URI.
+  either missing `:8443` in the URI, or is `aws-sdk-sagemaker-runtime-http2`
+  0.4.x, which holds the 424 until the input stream is closed (0.6 and later
+  raise it immediately). Pin `>=0.11` and bound the open with a timeout.
 - Streaming listing hit with `InvokeEndpoint` → 400 `No such model/language/tier`.
 - Latency metrics in CloudWatch are in **microseconds**; `ModelLatency` is not
   emitted for streaming — use `FirstChunkLatency` and `ConcurrentRequestsPerModel`.
