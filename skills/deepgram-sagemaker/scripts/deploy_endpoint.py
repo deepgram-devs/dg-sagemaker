@@ -227,15 +227,45 @@ def main() -> int:
                 nm = q.get("QuotaName", "")
                 if nm.endswith(" for endpoint usage"):
                     quota_by_type[nm[: -len(" for endpoint usage")]] = float(q.get("Value", 0))
+        # current usage per type from the quota's own CloudWatch usage metric (5-min resolution,
+        # may lag). Quota that is fully in use fails CreateEndpoint exactly like quota 0.
+        cw = client(session, "cloudwatch", region=region, fips=args.fips)
+        usage_by_type: dict[str, float] = {}
+        for page in sq.get_paginator("list_service_quotas").paginate(ServiceCode="sagemaker"):
+            for q in page.get("Quotas", []):
+                nm = q.get("QuotaName", "")
+                t = nm[: -len(" for endpoint usage")] if nm.endswith(" for endpoint usage") else None
+                um = q.get("UsageMetric")
+                if t in types and um:
+                    try:
+                        end = dt.datetime.now(dt.timezone.utc)
+                        stat = um.get("MetricStatisticRecommendation") or "Maximum"
+                        r = cw.get_metric_statistics(
+                            Namespace=um["MetricNamespace"], MetricName=um["MetricName"],
+                            Dimensions=[{"Name": k, "Value": v} for k, v in (um.get("MetricDimensions") or {}).items()],
+                            StartTime=end - dt.timedelta(minutes=15), EndTime=end, Period=300, Statistics=[stat])
+                        pts = r.get("Datapoints", [])
+                        usage_by_type[t] = float(max(pts, key=lambda d: d["Timestamp"])[stat]) if pts else 0.0
+                    except (ClientError, BotoCoreError):
+                        pass
         zero = [t for t in types if quota_by_type.get(t) == 0]
-        if zero and len(types) > 1:
+        full = [t for t in types if t not in zero and quota_by_type.get(t) is not None
+                and usage_by_type.get(t) is not None
+                and usage_by_type[t] + args.instance_count > quota_by_type[t]]
+        blocked = zero + full
+        if blocked and len(types) > len(blocked):
             for t in zero:
                 quota_notes.append(f"dropped {t} from the pool: endpoint quota is 0 in {region} "
                                    f"(check_quota.py --request N to raise it)")
-            types = [t for t in types if t not in zero]
-        elif zero:
-            quota_notes.append(f"WARNING: {zero[0]} has endpoint quota 0 in {region}; CreateEndpoint will fail "
-                               "with ResourceLimitExceeded. Run check_quota.py --request N, or pick another type.")
+            for t in full:
+                quota_notes.append(f"dropped {t} from the pool: quota {quota_by_type[t]:g} is fully in use "
+                                   f"({usage_by_type[t]:g} running) in {region}")
+            types = [t for t in types if t not in blocked]
+        elif blocked:
+            quota_notes.append(f"WARNING: every requested type ({', '.join(blocked)}) has no free quota in "
+                               f"{region} (quota 0 or fully in use); CreateEndpoint will fail with "
+                               "ResourceLimitExceeded. Run check_quota.py --request N, free an endpoint, or "
+                               "pick another type/region.")
         if not types:
             say("every type in the pool has quota 0 in this region — nothing to deploy on. "
                 "Run check_quota.py --request N or choose another region.")
@@ -337,6 +367,7 @@ def main() -> int:
                           "GPU instance billing starts now and continues until the endpoint is deleted.")
 
     result: dict = {"plan": plan}
+    created: list[str] = []  # for cleanup if a later create call fails
     # create ---------------------------------------------------------------------
     try:
         for attempt in range(6):
@@ -353,8 +384,10 @@ def main() -> int:
                     time.sleep(10)
                     continue
                 raise
+        created.append("model")
         say(f"-- created Model {name}")
         sm.create_endpoint_config(**config_kwargs)
+        created.append("config")
         say(f"-- created EndpointConfig {name}")
         sm.create_endpoint(EndpointName=name, EndpointConfigName=name)
         say(f"-- created Endpoint {name} (Creating)")
@@ -373,7 +406,18 @@ def main() -> int:
         if hint:
             result["hint"] = hint
             say(hint)
-        say("Cleaning up whatever was created: teardown_endpoint.py " + name + " --region " + region + " --yes")
+        # No endpoint exists, so teardown_endpoint.py (which keys on the endpoint) cannot find
+        # these; remove them here rather than leave an orphaned Model/EndpointConfig behind.
+        for kind in reversed(created):
+            try:
+                if kind == "config":
+                    sm.delete_endpoint_config(EndpointConfigName=name)
+                    say(f"-- cleaned up EndpointConfig {name}")
+                else:
+                    sm.delete_model(ModelName=name)
+                    say(f"-- cleaned up Model {name}")
+            except (ClientError, BotoCoreError) as e2:
+                say(f"-- could not clean up {kind} {name}: {aws_error_text(e2)}")
         fail_error("CreateModel/CreateEndpointConfig/CreateEndpoint failed", e)
     except BotoCoreError as e:
         fail_error("create call failed", e)
