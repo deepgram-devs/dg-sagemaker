@@ -244,6 +244,12 @@ in `scripts/_common.py`):
 - **Money/destruction gates** — `subscribe.py --accept`, `deploy_endpoint.py`,
   `update_endpoint.py`, `configure_autoscaling.py`, `check_quota.py --request`,
   `teardown_endpoint.py` all require `--yes`/`--accept`.
+- **Offer selection** — `subscribe.py` picks `--offer-id` → an AWS Marketplace
+  Field Demonstration Program offer (badge `FIELD_DEMONSTRATION_PROGRAM`, seen
+  only by AWS-enrolled accounts; skip with `--no-fdp`) → the standard public
+  offer. `offer_kind()` / `list_purchase_options()` in `_common.py` are the one
+  place that classifies offers; `list_products.py` uses the same helpers for its
+  `offer` column. Keep `references/field-demonstration-program.md` in step.
 
 `references/products.json` is the single source of truth for listings, product
 ids, API paths, required parameters and instance-type profiles. When a listing

@@ -63,6 +63,12 @@ EXIT_NEEDS_CONFIRMATION = 3
 MARKETPLACE_REGION = "us-east-1"
 #: Deepgram's AWS Marketplace seller profile id (public; used to filter listings).
 DEEPGRAM_SELLER_PROFILE_ID = "6efa21f9-9a33-4cae-ba44-756436fa71dd"
+#: Purchase-option badge that marks an AWS Marketplace Field Demonstration
+#: Program (FDP) offer. Only accounts AWS has enrolled in the program see it;
+#: for everyone else ListPurchaseOptions simply does not return the offer.
+#: See references/field-demonstration-program.md.
+FDP_BADGE = "FIELD_DEMONSTRATION_PROGRAM"
+FDP_DOC_URL = "https://docs.aws.amazon.com/marketplace/latest/userguide/field-demonstration-program.html"
 #: Minimum botocore that knows the MetricsConfig.EnableDetailedObservability
 #: field and the marketplace-discovery service.
 MIN_BOTOCORE = (1, 43, 49)
@@ -251,6 +257,40 @@ def find_product(catalog: dict, key: str) -> dict | None:
 
 def product_choices(catalog: dict) -> str:
     return ", ".join(p["slug"] for p in catalog["products"])
+
+
+# ---------------------------------------------------------------------------
+# Marketplace purchase options (offers)
+# ---------------------------------------------------------------------------
+
+def offer_kind(badges: list) -> str:
+    """Classify a purchase option by its badges.
+
+    'field_demonstration' — an AWS Marketplace Field Demonstration Program offer
+                            (badge FIELD_DEMONSTRATION_PROGRAM); visible only to
+                            enrolled AWS-internal accounts, no software charge.
+    'private'             — a private offer negotiated for this account (PRIVATE_PRICING).
+    'public'              — the standard public offer (no badge, or only
+                            informational badges such as AUTO_RENEW).
+    """
+    types = {b.get("badgeType") if isinstance(b, dict) else b for b in badges or []}
+    if FDP_BADGE in types:
+        return "field_demonstration"
+    if "PRIVATE_PRICING" in types:
+        return "private"
+    return "public"
+
+
+def list_purchase_options(disc, product_id: str) -> list[dict]:
+    """ListPurchaseOptions for one product, flattened to the fields the kit uses."""
+    opts = disc.list_purchase_options(filters=[
+        {"filterType": "PRODUCT_ID", "filterValues": [product_id]}]).get("purchaseOptions", [])
+    out = []
+    for o in opts:
+        badges = [b.get("badgeType") if isinstance(b, dict) else b for b in o.get("badges", [])]
+        out.append({"offer_id": o.get("purchaseOptionId"), "name": o.get("purchaseOptionName"),
+                    "badges": badges, "kind": offer_kind(badges)})
+    return out
 
 
 # ---------------------------------------------------------------------------
