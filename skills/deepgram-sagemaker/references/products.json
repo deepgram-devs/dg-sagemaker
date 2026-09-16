@@ -1,0 +1,317 @@
+{
+  "catalog_version": "2026-09-16.2",
+  "seller_profile_id": "6efa21f9-9a33-4cae-ba44-756436fa71dd",
+  "marketplace_search_url": "https://aws.amazon.com/marketplace/search/results?searchTerms=deepgram&CREATOR=6efa21f9-9a33-4cae-ba44-756436fa71dd&FULFILLMENT_OPTION_TYPE=SAGEMAKER_MODEL&filters=CREATOR%2CFULFILLMENT_OPTION_TYPE",
+  "manage_subscriptions_url": "https://us-east-1.console.aws.amazon.com/marketplace/subscriptions",
+  "docs": {
+    "overview": "https://developers.deepgram.com/docs/amazon-sagemaker",
+    "supported_products": "https://developers.deepgram.com/docs/supported-products-sagemaker",
+    "subscribe": "https://developers.deepgram.com/docs/subscribe-aws-marketplace",
+    "deploy": "https://developers.deepgram.com/docs/deploy-amazon-sagemaker",
+    "invoke": "https://developers.deepgram.com/docs/invoke-sagemaker-endpoint",
+    "troubleshooting": "https://developers.deepgram.com/docs/troubleshooting-sagemaker"
+  },
+  "inference_ami_version": "al2023-ami-sagemaker-inference-gpu-4-1",
+  "instance_profiles": {
+    "stt-single-gpu": {
+      "recommended": "ml.g6.2xlarge",
+      "default_pool": [
+        "ml.g6.2xlarge",
+        "ml.g6e.2xlarge",
+        "ml.g5.2xlarge"
+      ],
+      "supported": [
+        "ml.g6.2xlarge",
+        "ml.g6e.2xlarge",
+        "ml.g5.2xlarge",
+        "ml.g4dn.2xlarge",
+        "ml.g7.2xlarge",
+        "ml.g7e.2xlarge"
+      ],
+      "note": "Single GPU. ml.g7/ml.g7e only exist in versions published after the g7 rollout; the script verifies against the package's own supported list."
+    },
+    "flux-single-gpu": {
+      "recommended": "ml.g6.2xlarge",
+      "default_pool": [
+        "ml.g6.2xlarge",
+        "ml.g6e.2xlarge",
+        "ml.g5.2xlarge"
+      ],
+      "supported": [
+        "ml.g6.2xlarge",
+        "ml.g6e.2xlarge",
+        "ml.g5.2xlarge",
+        "ml.g7.2xlarge",
+        "ml.g7e.2xlarge"
+      ],
+      "unsupported": [
+        "ml.g4dn.*"
+      ],
+      "note": "Flux has no kernel for the T4 (sm_75) GPU in ml.g4dn. A g4dn endpoint can reach InService and return empty or garbage transcripts, so it is excluded."
+    },
+    "tts-multi-gpu": {
+      "recommended": "ml.g6.12xlarge",
+      "default_pool": [
+        "ml.g6.12xlarge",
+        "ml.g6e.12xlarge",
+        "ml.g5.12xlarge"
+      ],
+      "supported": [
+        "ml.g6.12xlarge",
+        "ml.g6e.12xlarge",
+        "ml.g5.12xlarge",
+        "ml.g4dn.12xlarge",
+        "ml.g7.12xlarge",
+        "ml.g7e.12xlarge"
+      ],
+      "unsupported": [
+        "ml.*.2xlarge",
+        "any single-GPU type"
+      ],
+      "note": "Aura-2 needs 2+ GPUs on one instance; single-GPU types fail at model load."
+    },
+    "flux-tts-single-gpu": {
+      "recommended": "ml.g6e.2xlarge",
+      "default_pool": [
+        "ml.g6e.2xlarge",
+        "ml.g6.2xlarge",
+        "ml.g7e.2xlarge"
+      ],
+      "supported": [
+        "ml.g6e.2xlarge",
+        "ml.g6.2xlarge",
+        "ml.g7.2xlarge",
+        "ml.g7e.2xlarge"
+      ],
+      "unsupported": [
+        "ml.g5.*",
+        "ml.g4dn.*"
+      ],
+      "note": "Single GPU, ml.g6 is the floor. Neither g5 nor g4dn is supported."
+    }
+  },
+  "products": [
+    {
+      "slug": "nova-3-mono-streaming",
+      "product_id": "prod-tnv5pm6nlcm44",
+      "listing_name": "Deepgram Voice AI Nova-3 Monolingual Speech-to-Text (STT) Streaming",
+      "service": "stt",
+      "family": "nova-3",
+      "languages": "monolingual",
+      "transport": "streaming",
+      "invocation_modes": [
+        "streaming"
+      ],
+      "api_path": "v1/listen",
+      "base_params": {
+        "model": "nova-3"
+      },
+      "language_param": "per-version: pick a language the chosen version carries (e.g. en); the version title lists them",
+      "default_language": "en",
+      "instance_profile": "stt-single-gpu",
+      "use_when": "Live audio (calls, meetings, voice UIs) in ONE known language. Each version of this listing covers a set of languages; the endpoint serves the languages in the version you deploy.",
+      "gotchas": [
+        "Streaming listing: InvokeEndpoint (synchronous HTTP) returns 400 'No such model/language/tier'. Use InvokeEndpointWithBidirectionalStream, or deploy the Batch listing for HTTP.",
+        "language must be one the deployed version carries; an unknown language closes the stream in ~1s with no transcript.",
+        "Bidirectional streaming client MUST connect to port 8443 (runtime.sagemaker.<region>.amazonaws.com:8443). Port 443 hangs forever with no error."
+      ]
+    },
+    {
+      "slug": "nova-3-mono-batch",
+      "product_id": "prod-3lxrfuufwnzse",
+      "listing_name": "Deepgram Voice AI Nova-3 Monolingual Speech-to-Text (STT) Batch",
+      "service": "stt",
+      "family": "nova-3",
+      "languages": "monolingual",
+      "transport": "batch",
+      "invocation_modes": [
+        "sync"
+      ],
+      "api_path": "v1/listen",
+      "base_params": {
+        "model": "nova-3"
+      },
+      "language_param": "per-version: pick a language the chosen version carries (e.g. en)",
+      "default_language": "en",
+      "instance_profile": "stt-single-gpu",
+      "use_when": "Pre-recorded audio in ONE known language. Files up to 25 MB per request via InvokeEndpoint on a real-time endpoint. Asynchronous endpoints (InvokeEndpointAsync, up to 1 GB) are temporarily not supported for Marketplace-hosted Deepgram; contact a Deepgram representative if you need them.",
+      "gotchas": [
+        "Asynchronous endpoints are TEMPORARILY NOT SUPPORTED for Marketplace-hosted Deepgram. Deploy real-time and use InvokeEndpoint; for files over 25 MB or an async use case, contact a Deepgram representative.",
+        "Deepgram query parameters ride in CustomAttributes as 'v1/listen?model=nova-3&language=en&...'. The path prefix is mandatory."
+      ]
+    },
+    {
+      "slug": "nova-3-multi-streaming",
+      "product_id": "prod-oibslud6m2ckc",
+      "listing_name": "Deepgram Voice AI Nova-3 Multilingual Speech-to-Text (STT) Streaming",
+      "service": "stt",
+      "family": "nova-3",
+      "languages": "multilingual",
+      "transport": "streaming",
+      "invocation_modes": [
+        "streaming"
+      ],
+      "api_path": "v1/listen",
+      "base_params": {
+        "model": "nova-3",
+        "language": "multi"
+      },
+      "language_param": "fixed: language=multi (code-switching model)",
+      "default_language": "multi",
+      "instance_profile": "stt-single-gpu",
+      "use_when": "Live audio where speakers may switch languages mid-conversation, or the language is unknown up front.",
+      "gotchas": [
+        "REQUIRES language=multi. language=en (or any specific code) returns 400 / closes the stream with no transcript — the endpoint is fine, the request is wrong.",
+        "Streaming listing: synchronous InvokeEndpoint returns 400. Use bidirectional streaming on port 8443."
+      ]
+    },
+    {
+      "slug": "nova-3-multi-batch",
+      "product_id": "prod-mb6c6do2hetxw",
+      "listing_name": "Deepgram Voice AI Nova-3 Multilingual Speech-to-Text (STT) Batch",
+      "service": "stt",
+      "family": "nova-3",
+      "languages": "multilingual",
+      "transport": "batch",
+      "invocation_modes": [
+        "sync"
+      ],
+      "api_path": "v1/listen",
+      "base_params": {
+        "model": "nova-3",
+        "language": "multi"
+      },
+      "language_param": "fixed: language=multi",
+      "default_language": "multi",
+      "instance_profile": "stt-single-gpu",
+      "use_when": "Pre-recorded audio with mixed or unknown languages.",
+      "gotchas": [
+        "Asynchronous endpoints are TEMPORARILY NOT SUPPORTED for Marketplace-hosted Deepgram. Deploy real-time and use InvokeEndpoint; for files over 25 MB or an async use case, contact a Deepgram representative.",
+        "REQUIRES language=multi.",
+        "Large multilingual bundles can need ModelDataDownloadTimeoutInSeconds above 600; deploy_endpoint.py defaults this listing to 1800."
+      ]
+    },
+    {
+      "slug": "flux-en",
+      "aliases": [
+        "flux-english",
+        "flux-mono-streaming"
+      ],
+      "product_id": "prod-evoahsilurrfa",
+      "listing_name": "Deepgram Voice AI Flux Monolingual STT Streaming",
+      "service": "stt",
+      "family": "flux",
+      "languages": "monolingual",
+      "transport": "streaming",
+      "invocation_modes": [
+        "streaming"
+      ],
+      "api_path": "v2/listen",
+      "base_params": {
+        "model": "flux-general-en"
+      },
+      "language_param": "none — Flux selects the model by name; there is no language parameter",
+      "instance_profile": "flux-single-gpu",
+      "use_when": "Voice agents / conversational turn-taking in English. Flux is a conversational speech recognition model with built-in end-of-turn detection (StartOfTurn / EagerEndOfTurn / EndOfTurn events) on /v2/listen.",
+      "gotchas": [
+        "Flux is on /v2/listen with a turn-based protocol (TurnInfo events), not /v1/listen. A /v1/listen client gets 400.",
+        "Streaming only: no InvokeEndpoint / InvokeEndpointAsync.",
+        "encoding=linear16 and sample_rate are required query parameters.",
+        "Not supported on ml.g4dn (T4)."
+      ]
+    },
+    {
+      "slug": "flux-multi",
+      "aliases": [
+        "flux-multilingual",
+        "flux-multi-streaming"
+      ],
+      "product_id": "prod-2yfvor3c4u6me",
+      "listing_name": "Deepgram Voice AI Flux Multilingual STT Streaming",
+      "service": "stt",
+      "family": "flux",
+      "languages": "multilingual",
+      "transport": "streaming",
+      "invocation_modes": [
+        "streaming"
+      ],
+      "api_path": "v2/listen",
+      "base_params": {
+        "model": "flux-general-multi"
+      },
+      "language_param": "none — model=flux-general-multi selects the multilingual model; do NOT send language=",
+      "instance_profile": "flux-single-gpu",
+      "use_when": "Voice agents / conversational turn-taking in multiple languages.",
+      "gotchas": [
+        "Select with model=flux-general-multi. There is NO language parameter; sending one is a 400.",
+        "Flux is on /v2/listen; streaming only; encoding+sample_rate required; not on ml.g4dn."
+      ]
+    },
+    {
+      "slug": "aura-2",
+      "aliases": [
+        "aura-2-tts",
+        "aura2"
+      ],
+      "product_id": "prod-5qjsvi7cpasyy",
+      "listing_name": "Deepgram Voice AI Aura-2 Text-to-Speech (TTS)",
+      "service": "tts",
+      "family": "aura-2",
+      "languages": "per-version (e.g. en, es)",
+      "transport": "both",
+      "invocation_modes": [
+        "streaming",
+        "sync"
+      ],
+      "api_path": "v1/speak",
+      "base_params": {
+        "model": "aura-2-thalia-en"
+      },
+      "language_param": "voice is chosen by model=aura-2-<voice>-<lang>; the version you deploy determines which languages' voices exist",
+      "default_voice": "aura-2-thalia-en",
+      "instance_profile": "tts-multi-gpu",
+      "use_when": "Text-to-speech. One listing serves BOTH WebSocket streaming (Speak/Flush/Close messages) and synchronous HTTP (POST JSON {\"text\": ...}) from the same endpoint.",
+      "gotchas": [
+        "Needs a multi-GPU instance (ml.*.12xlarge). Single-GPU types fail at model load.",
+        "Sync HTTP body is JSON {\"text\": \"...\"} with ContentType application/json and CustomAttributes 'v1/speak?model=aura-2-thalia-en&encoding=linear16&sample_rate=24000'.",
+        "Streaming: send {\"type\":\"Speak\",\"text\":...} then {\"type\":\"Flush\"}; audio arrives as binary frames; {\"type\":\"Close\"} ends the session."
+      ]
+    },
+    {
+      "slug": "flux-tts",
+      "aliases": [
+        "aura-3",
+        "flux-text-to-speech"
+      ],
+      "product_id": "prod-dfqlk3u4c7vg4",
+      "listing_name": "Deepgram Voice AI Flux Text-to-Speech (TTS)",
+      "service": "tts",
+      "family": "flux-tts",
+      "languages": "per-version",
+      "transport": "both",
+      "invocation_modes": [
+        "streaming",
+        "sync"
+      ],
+      "api_path": "v2/speak",
+      "base_params": {
+        "model": "flux-alexis-en"
+      },
+      "language_param": "voice is chosen by model=flux-<voice>-<lang>",
+      "default_voice": "flux-alexis-en",
+      "instance_profile": "flux-tts-single-gpu",
+      "use_when": "Turn-based text-to-speech for voice agents on /v2/speak (Speak … Flush per turn, Interrupt supported). Same endpoint serves streaming and synchronous HTTP.",
+      "gotchas": [
+        "API path is v2/speak, not v1/speak.",
+        "Single GPU; ml.g6 is the floor — g5 and g4dn are not supported.",
+        "/v2/speak rejects unknown query parameters with 400 rather than ignoring them.",
+        "`speed` is not a flux-tts parameter."
+      ]
+    }
+  ],
+  "instance_pools_guidance": "Deploy with an ordered pool (default_pool) rather than one type: SageMaker falls back to the next type when the first has no capacity. Priority 1 = recommended type; then same-or-newer generation with similar per-instance capacity; older generations last as insurance. Every type in the pool needs quota >= 1 (quota does not fall back). See references/instance-pools.md.",
+  "async_endpoints": {
+    "supported": false,
+    "note": "Asynchronous inference (AsyncInferenceConfig / InvokeEndpointAsync) is temporarily not supported for Marketplace-hosted Deepgram endpoints. If you have an async use case, reach out to a Deepgram representative. The scripts refuse --async-bucket / --mode async."
+  }
+}

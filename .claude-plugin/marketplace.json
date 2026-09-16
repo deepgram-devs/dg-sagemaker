@@ -1,0 +1,18 @@
+{
+  "name": "deepgram",
+  "owner": {"name": "Deepgram"},
+  "metadata": {
+    "description": "Deepgram agent skills for Amazon SageMaker",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "deepgram-sagemaker",
+      "source": "./",
+      "description": "Subscribe, deploy, validate, operate and tear down Deepgram models on Amazon SageMaker with deterministic scripts.",
+      "version": "0.1.0",
+      "category": "devops",
+      "keywords": ["deepgram", "sagemaker", "aws"]
+    }
+  ]
+}

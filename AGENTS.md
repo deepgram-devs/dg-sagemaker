@@ -187,3 +187,76 @@ e2e process to fully exit before calling `delete-endpoint`. The streaming e2e
 keeps making invocations until the very end (`concurrent_10x_15min`,
 `adversarial_bare_close`). Killing the endpoint mid-run causes the remaining
 scenarios to all 5xx and produces a misleading "PASSED: 0" result.
+
+## The onboarding skill (`skills/deepgram-sagemaker/`)
+
+Customer-facing, agent-readable, and installable on its own (`npx skills add
+deepgram-devs/dg-sagemaker`, or as a Claude Code plugin via `.claude-plugin/`).
+Everything under `skills/` ships to a customer's machine, so the codename rule
+above applies to `SKILL.md`, `references/*.md` and every `--help` string.
+
+Contract every script in `skills/deepgram-sagemaker/scripts/` follows (details
+in `scripts/_common.py`):
+
+- **Exit codes** — `0` success · `1` negative result (the check ran; the answer
+  is "no") · `2` the AWS call itself failed (credentials/IAM/network — says
+  nothing about the thing being checked) · `3` needs human confirmation (money
+  or destructive action run without `--yes`). Never let a failed call read as a
+  negative: no `except Exception: return {}`, no swallowed stderr.
+- **Output** — human text on stderr; with `--json` one JSON document on stdout.
+- **Region** — `--region` or `AWS_REGION`; no built-in default region.
+- **FIPS** — `--fips` per client, never `AWS_USE_FIPS_ENDPOINT` process-wide.
+- **Dependencies** — PEP 723 inline metadata (`# /// script`), run with `uv run`;
+  no shared venv. Keep `boto3>=1.43.49` (marketplace-discovery service model,
+  `MetricsConfig.EnableDetailedObservability`). `invoke_test.py` uses
+  `aws-sdk-sagemaker-runtime-http2[awscrt]>=0.11` — the 0.11 API
+  (`AsyncSageMakerRuntimeHTTP2Client`, `await ...Config.resolve(...)`, typed
+  `ModelStreamError` events) differs from the 0.6 API the older `python-*`
+  drivers use; do not copy client code between them without porting.
+- **Asynchronous endpoints** are temporarily not supported for Marketplace-hosted
+  Deepgram: `deploy_endpoint.py` refuses `--async-bucket` and the references say
+  to contact a Deepgram representative. Re-enable in `products.json`
+  (`async_endpoints.supported`) and the scripts together when that changes.
+- **Money/destruction gates** — `subscribe.py --accept`, `deploy_endpoint.py`,
+  `update_endpoint.py`, `configure_autoscaling.py`, `check_quota.py --request`,
+  `teardown_endpoint.py` all require `--yes`/`--accept`.
+
+`references/products.json` is the single source of truth for listings, product
+ids, API paths, required parameters and instance-type profiles. When a listing
+changes (new product id, new instance family, new recommended type), update it
+and bump `catalog_version`; the STT/TTS README tables in this repo and the
+public docs must agree with it.
+
+`resolve_model_package_arn.py` uses the read-only Marketplace operation the
+console uses (`GetListingView`) because no documented buyer API returns
+ModelPackage ARNs (verified 2026-09: ListFulfillmentOptions, GetProduct,
+GetListing, SearchListings, GetAgreementEntitlements all omit them). It is
+best-effort by design and prints the console procedure when it fails — keep that
+fallback.
+
+**No public capacity numbers.** Do not put per-instance concurrency figures,
+benchmark tables or "streams per GPU" estimates anywhere in `skills/` (or this
+repo's READMEs). The guidance is: measure on your own endpoint with your own
+request parameters (the load drivers here), and ask a Deepgram representative
+for a planning estimate. Capacity varies several-fold with request features, so
+a published number is wrong for most customers and becomes a support burden.
+
+**Capacity guidance the skill gives.** Instance pools are the default
+recommendation (`--instance-pools default` → the product's `default_pool`,
+recommended type first); a single `--instance-type` needs
+`--single-type-reason`. `deploy_endpoint.py` drops zero-quota rungs itself.
+Rationale and ordering rules live in `references/instance-pools.md`; keep the
+scripts, `products.json` and that page in agreement.
+
+**Verification record.** Buyer-side runs in Deepgram dev accounts, 2026-09-16:
+subscribe (quote → accept → entitlement PROVISIONED), resolve ARN, quota,
+execution role, real-time deploy on a pool (single-type deploys failed on
+capacity twice that day), streaming PASS on the 0.11 HTTP/2 client, sync PASS on
+a Batch listing, the streaming-listing-vs-sync 400 and wrong-language 424
+diagnoses, teardown with post-delete verification. Not exercised:
+`configure_autoscaling.py`, `update_endpoint.py`, `--fips`, non-English
+versions, TTS products through `invoke_test.py`.
+
+When you add, rename or remove a script, update the "Agent-assisted setup"
+section of the top-level README and the phase list in `SKILL.md` in the same
+change.

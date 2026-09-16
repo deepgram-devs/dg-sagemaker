@@ -2,6 +2,53 @@
 
 Automation scripts for testing Deepgram services running on Amazon SageMaker as an "Endpoint" resource.
 
+## Agent-assisted setup (skills)
+
+[`skills/deepgram-sagemaker/`](skills/deepgram-sagemaker/) is an installable agent
+skill that walks a customer from AWS Marketplace subscription to a tested
+SageMaker endpoint, running every AWS step through a deterministic script
+instead of hand-typed console or CLI work. It follows the open
+[`SKILL.md`](https://agentskills.io) format, so it works in Claude Code, Codex,
+Cursor and other agents that read skills.
+
+Install into a project:
+
+```bash
+npx skills add deepgram-devs/dg-sagemaker          # any SKILL.md-aware agent
+# Claude Code plugin:
+/plugin marketplace add deepgram-devs/dg-sagemaker
+/plugin install deepgram-sagemaker@deepgram
+```
+
+Then ask the agent, e.g. "set up Deepgram Nova-3 streaming on SageMaker in
+us-east-2". It needs AWS credentials for the target account and
+[`uv`](https://docs.astral.sh/uv/) (each script declares its own dependencies).
+The agent confirms with you before anything that costs money (subscribing,
+creating an endpoint) or deletes resources, recommends an instance *pool*
+rather than a single type, and refuses asynchronous endpoints, which are
+temporarily not supported for Marketplace-hosted Deepgram (ask a Deepgram
+representative if you need them). For capacity planning it will tell you to
+measure concurrency on your own endpoint — or ask a Deepgram representative —
+rather than quote a number.
+
+The scripts also work on their own (`uv run skills/deepgram-sagemaker/scripts/<script>.py --help`):
+
+- [`preflight.py`](skills/deepgram-sagemaker/scripts/preflight.py) — credentials, region, tool versions, and a permission smoke test per phase
+- [`list_products.py`](skills/deepgram-sagemaker/scripts/list_products.py) — Deepgram's SageMaker listings and this account's subscription state (ACTIVE agreements only)
+- [`subscribe.py`](skills/deepgram-sagemaker/scripts/subscribe.py) — the Marketplace Agreement API subscribe flow; quotes without `--accept`, subscribes with it
+- [`resolve_model_package_arn.py`](skills/deepgram-sagemaker/scripts/resolve_model_package_arn.py) — product + version → per-region ModelPackage ARN, recommended and supported instance types
+- [`check_quota.py`](skills/deepgram-sagemaker/scripts/check_quota.py) — per-type endpoint quota, current usage, in-flight requests; `--request N` opens an increase
+- [`create_execution_role.py`](skills/deepgram-sagemaker/scripts/create_execution_role.py) — idempotent SageMaker execution role (+ S3 grant for async)
+- [`deploy_endpoint.py`](skills/deepgram-sagemaker/scripts/deploy_endpoint.py) — Model + EndpointConfig + Endpoint with the required settings baked in; waits and diagnoses failures
+- [`endpoint_status.py`](skills/deepgram-sagemaker/scripts/endpoint_status.py) — status, variant, log tail, named cause + next step
+- [`invoke_test.py`](skills/deepgram-sagemaker/scripts/invoke_test.py) — one real streaming or synchronous request with the right path and params; explains the classic 400s
+- [`configure_autoscaling.py`](skills/deepgram-sagemaker/scripts/configure_autoscaling.py) — target-tracking auto-scaling for real-time endpoints
+- [`update_endpoint.py`](skills/deepgram-sagemaker/scripts/update_endpoint.py) — in-place update (instance type/count, AMI, env, model version) with rollback
+- [`teardown_endpoint.py`](skills/deepgram-sagemaker/scripts/teardown_endpoint.py) — delete endpoint + config + model, then verify nothing is left
+
+Reference material the skill reads lives in [`skills/deepgram-sagemaker/references/`](skills/deepgram-sagemaker/references/)
+(`products.json` is the machine-readable catalog of listings, API paths, required parameters and instance types).
+
 ## Speech-to-Text (STT)
 
 ### JavaScript

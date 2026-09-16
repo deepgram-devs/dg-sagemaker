@@ -1,0 +1,20 @@
+{
+  "name": "deepgram-sagemaker",
+  "version": "0.1.0",
+  "description": "Agent skill + deterministic scripts to subscribe to, deploy, validate, operate and tear down Deepgram speech models (Nova-3, Flux, Aura-2, Flux TTS) on Amazon SageMaker via AWS Marketplace.",
+  "author": {
+    "name": "Deepgram"
+  },
+  "homepage": "https://developers.deepgram.com/docs/amazon-sagemaker",
+  "repository": "https://github.com/deepgram-devs/dg-sagemaker",
+  "keywords": [
+    "deepgram",
+    "sagemaker",
+    "aws-marketplace",
+    "speech-to-text",
+    "text-to-speech"
+  ],
+  "skills": [
+    "./skills/deepgram-sagemaker"
+  ]
+}
