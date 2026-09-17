@@ -1,6 +1,6 @@
 ---
 name: deepgram-sagemaker
-description: Set up and run Deepgram speech models (Nova-3 and Flux speech-to-text, Aura-2 and Flux text-to-speech) on Amazon SageMaker through AWS Marketplace. Use when someone wants to subscribe to a Deepgram SageMaker listing, find a model package ARN, pick an instance type, create or update or delete a SageMaker endpoint for Deepgram, test that a Deepgram endpoint works, configure auto-scaling, or debug a Deepgram endpoint that failed to start or returns 400s. Requires AWS credentials for the customer's account and the `uv` tool.
+description: Set up and run Deepgram speech models (Nova-3 and Flux speech-to-text, Aura-2 and Flux text-to-speech) on Amazon SageMaker through AWS Marketplace. Use when someone wants to subscribe to a Deepgram SageMaker listing (public, private or AWS Marketplace Field Demonstration Program offer), find a model package ARN, pick an instance type, create or update or delete a SageMaker endpoint for Deepgram, test that a Deepgram endpoint works, configure auto-scaling, or debug a Deepgram endpoint that failed to start or returns 400s. Requires AWS credentials for the customer's account and the `uv` tool.
 ---
 
 # Deepgram on Amazon SageMaker
@@ -62,6 +62,15 @@ If exit 1 (not subscribed): `uv run scripts/subscribe.py <slug>` shows the offer
 terms and creates a quote (no charge). Read the terms to the person, then
 `… --accept`. Private offer → `--offer-id`. Already-used free trial →
 `--no-free-trial`. Subscribing costs nothing until an endpoint runs.
+
+**Field Demonstration Program (FDP).** If the account is one AWS has enrolled
+in the AWS Marketplace Field Demonstration Program (AWS field staff
+demonstrating products), `list_products.py` shows `fdp` in its `offer` column
+and `subscribe.py` selects the FDP offer by default: no Deepgram software
+charge, SageMaker instance-hours still billed, meant for demonstrations rather
+than production. Tell the person which kind of offer is being accepted. Other
+accounts never see the offer and nothing changes for them. `--no-fdp` takes the
+public offer instead. Details and the agent rules: `references/field-demonstration-program.md`.
 
 ### Phase 3 — Parameters
 1. `uv run scripts/resolve_model_package_arn.py <slug> --region <region> [--version "<substring>"] --json`
@@ -128,5 +137,5 @@ Full table: `references/troubleshooting.md`.
 ## Files
 - `scripts/` — one script per step; `--help` on each.
 - `references/products.json` — the listings, families, API paths, required params, instance types.
-- `references/decision-guide.md`, `iam.md`, `deploy-parameters.md`, `instance-pools.md`, `invoke.md`, `troubleshooting.md`.
+- `references/decision-guide.md`, `iam.md`, `deploy-parameters.md`, `instance-pools.md`, `invoke.md`, `troubleshooting.md`, `field-demonstration-program.md`.
 - `assets/spacewalk.wav` — 26 s English sample used by `invoke_test.py`.

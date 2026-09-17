@@ -9,7 +9,8 @@
     "subscribe": "https://developers.deepgram.com/docs/subscribe-aws-marketplace",
     "deploy": "https://developers.deepgram.com/docs/deploy-amazon-sagemaker",
     "invoke": "https://developers.deepgram.com/docs/invoke-sagemaker-endpoint",
-    "troubleshooting": "https://developers.deepgram.com/docs/troubleshooting-sagemaker"
+    "troubleshooting": "https://developers.deepgram.com/docs/troubleshooting-sagemaker",
+    "field_demonstration_program": "https://docs.aws.amazon.com/marketplace/latest/userguide/field-demonstration-program.html"
   },
   "inference_ami_version": "al2023-ami-sagemaker-inference-gpu-4-1",
   "instance_profiles": {

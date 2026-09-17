@@ -34,8 +34,8 @@ rather than quote a number.
 The scripts also work on their own (`uv run skills/deepgram-sagemaker/scripts/<script>.py --help`):
 
 - [`preflight.py`](skills/deepgram-sagemaker/scripts/preflight.py) — credentials, region, tool versions, and a permission smoke test per phase
-- [`list_products.py`](skills/deepgram-sagemaker/scripts/list_products.py) — Deepgram's SageMaker listings and this account's subscription state (ACTIVE agreements only)
-- [`subscribe.py`](skills/deepgram-sagemaker/scripts/subscribe.py) — the Marketplace Agreement API subscribe flow; quotes without `--accept`, subscribes with it
+- [`list_products.py`](skills/deepgram-sagemaker/scripts/list_products.py) — Deepgram's SageMaker listings, this account's subscription state (ACTIVE agreements only) and which offers it can accept (public / private / AWS Marketplace Field Demonstration Program)
+- [`subscribe.py`](skills/deepgram-sagemaker/scripts/subscribe.py) — the Marketplace Agreement API subscribe flow; quotes without `--accept`, subscribes with it; prefers a Field Demonstration Program offer when the account sees one (`--no-fdp` for the public offer)
 - [`resolve_model_package_arn.py`](skills/deepgram-sagemaker/scripts/resolve_model_package_arn.py) — product + version → per-region ModelPackage ARN, recommended and supported instance types
 - [`check_quota.py`](skills/deepgram-sagemaker/scripts/check_quota.py) — per-type endpoint quota, current usage, in-flight requests; `--request N` opens an increase
 - [`create_execution_role.py`](skills/deepgram-sagemaker/scripts/create_execution_role.py) — idempotent SageMaker execution role (+ S3 grant for async)

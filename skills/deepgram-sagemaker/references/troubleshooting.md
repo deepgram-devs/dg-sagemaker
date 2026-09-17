@@ -3,6 +3,14 @@
 Start with `endpoint_status.py <name> --region <r>`: status, FailureReason, whether
 the container log group exists, last log lines and a `classification`.
 
+## Subscribing
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| An AWS employee expected a Field Demonstration Program offer but `list_products.py` shows only `public` and `subscribe.py` selects the public offer | the account is not enrolled in the AWS Marketplace Field Demonstration Program; only enrolled accounts see the offer | enrollment is handled by AWS Marketplace, not by this kit — the person's AWS internal guidance covers it. Meanwhile the public offer (free trial once per product per account) or a private offer works. See `field-demonstration-program.md`. |
+| `list_products.py` says a product is subscribed on the `public` offer although an FDP offer is available | the subscription predates enrollment, or was made with `--no-fdp` / in the console | only one agreement per product can be active: cancel it in the console (Manage subscriptions), then re-run `subscribe.py <slug>`; it selects the FDP offer. |
+| `CreateAgreementRequest` rejected with the free-trial term | this account already used the 14-day trial for this product | `subscribe.py` retries without it automatically; or pass `--no-free-trial`. |
+
 ```bash
 aws logs tail --follow /aws/sagemaker/Endpoints/<name> --region <r>
 aws sagemaker describe-endpoint --endpoint-name <name> --region <r> --query '{Status:EndpointStatus,FailureReason:FailureReason}'

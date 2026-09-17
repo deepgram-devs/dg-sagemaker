@@ -9,8 +9,12 @@ Implements the documented Marketplace API flow
 (https://developers.deepgram.com/docs/subscribe-aws-marketplace):
 
   1. SearchAgreements     — already ACTIVE?  then stop: you are subscribed.
-  2. ListPurchaseOptions  — find the standard public offer (no PRIVATE_PRICING
-                            badge). Pass --offer-id to accept a private offer instead.
+  2. ListPurchaseOptions  — pick the offer, in this order:
+                              --offer-id                      an offer you name (e.g. a private offer)
+                              FIELD_DEMONSTRATION_PROGRAM     an AWS Marketplace Field Demonstration
+                                                              Program (FDP) offer, if the account sees
+                                                              one (skip with --no-fdp)
+                              standard public offer           no PRIVATE_PRICING / FDP badge
   3. GetOffer / GetOfferTerms — proposal id + the terms (Legal, Support,
                             UsageBasedPricing, FreeTrialPricing) that will be accepted.
   4. CreateAgreementRequest — a QUOTE. Costs nothing, subscribes nothing.
@@ -22,8 +26,16 @@ is deployed; the standard public offer is usage-priced with a 14-day free trial
 (once per product per account). Without --accept the script prints the terms
 and the quote and exits 3 (needs confirmation) so the person can say yes.
 
+An FDP offer is only returned for AWS accounts that AWS has enrolled in the
+Field Demonstration Program (AWS field staff demonstrating Marketplace products
+to customers). Under it the Deepgram software charge is not collected — the
+SageMaker instance-hours still are — so it is the right offer for such an
+account and the script prefers it. Its rate card shows the list price; that is
+how FDP offers are published. See references/field-demonstration-program.md.
+
   uv run subscribe.py nova-3-mono-streaming            # show offer + terms, create quote, stop
   uv run subscribe.py nova-3-mono-streaming --accept   # subscribe
+  uv run subscribe.py nova-3-mono-streaming --no-fdp --accept   # public offer even if FDP is visible
   uv run subscribe.py prod-5qjsvi7cpasyy --offer-id offer-xxxx --accept   # private offer
 
 Exit 0 subscribed (or already was) · 1 no usable offer · 2 AWS error · 3 needs --accept.
@@ -36,9 +48,16 @@ import time
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from _common import (EXIT_NEGATIVE, EXIT_OK, MARKETPLACE_REGION, add_common_args, aws_error_text,
-                     client, confirm_or_exit, fail_error, find_product, finish, load_catalog,
-                     make_session, product_choices, say)
+from _common import (EXIT_NEGATIVE, EXIT_OK, FDP_DOC_URL, MARKETPLACE_REGION, add_common_args,
+                     aws_error_text, client, confirm_or_exit, fail_error, find_product, finish,
+                     list_purchase_options, load_catalog, make_session, product_choices, say)
+
+OFFER_KIND_LABEL = {
+    "field_demonstration": "Field Demonstration Program offer (no Deepgram software charge; "
+                           "for AWS field staff demonstrating the product)",
+    "private": "private offer",
+    "public": "standard public offer",
+}
 
 ENTITLEMENT_PENDING = ("PENDING", "PROVISIONING_IN_PROGRESS")
 
@@ -87,7 +106,11 @@ def main() -> int:
     p.add_argument("product", help="catalog slug (e.g. nova-3-mono-streaming) or prod-… id")
     add_common_args(p, region=False)
     p.add_argument("--offer-id", default=None,
-                   help="accept this specific offer (e.g. a private offer) instead of the public one")
+                   help="accept this specific offer (e.g. a private offer) instead of the one the "
+                        "script would pick")
+    p.add_argument("--no-fdp", action="store_true",
+                   help="do not prefer a Field Demonstration Program offer; take the standard public "
+                        "offer even if the account sees an FDP one")
     p.add_argument("--no-free-trial", action="store_true",
                    help="omit the FreeTrialPricingTerm (required if this account already used the trial)")
     p.add_argument("--accept", action="store_true",
@@ -115,44 +138,72 @@ def main() -> int:
         existing = active_agreement(agree, pid)
     except (ClientError, BotoCoreError) as e:
         fail_error("could not check existing agreements (SearchAgreements)", e)
+    # 2. offers ------------------------------------------------------------
+    try:
+        options = list_purchase_options(disc, pid)
+    except (ClientError, BotoCoreError) as e:
+        if existing:  # already subscribed: the offer list is informational only
+            say(f"note: ListPurchaseOptions failed ({aws_error_text(e)}); cannot tell which kind of "
+                "offer the active agreement is on")
+            options = []
+        else:
+            fail_error("ListPurchaseOptions failed", e)
+    fdp_offers = [o for o in options if o["kind"] == "field_demonstration"]
+    result["purchase_options"] = options
+    result["fdp_offer_available"] = bool(fdp_offers)
+
     if existing:
+        active_offer = (existing.get("proposalSummary") or {}).get("offerId")
+        active_kind = next((o["kind"] for o in options if o["offer_id"] == active_offer), None)
         result.update(status="already_subscribed", agreement_id=existing["agreementId"],
-                      offer_id=(existing.get("proposalSummary") or {}).get("offerId"))
-        say(f"{prod['slug']} ({pid}) is ALREADY SUBSCRIBED — agreement {existing['agreementId']}.")
-        say("Only one offer per listing can be active at a time. To switch to a private offer, cancel "
+                      offer_id=active_offer, offer_kind=active_kind)
+        say(f"{prod['slug']} ({pid}) is ALREADY SUBSCRIBED — agreement {existing['agreementId']} "
+            f"on offer {active_offer}" + (f" ({OFFER_KIND_LABEL[active_kind]})" if active_kind else "") + ".")
+        if fdp_offers and active_kind not in (None, "field_demonstration"):
+            say(f"NOTE: this account also sees a Field Demonstration Program offer "
+                f"({fdp_offers[0]['offer_id']}) for this product, but the active subscription is on "
+                f"the {OFFER_KIND_LABEL[active_kind]}. Under FDP the Deepgram software charge is not "
+                f"collected. To move to it, cancel this subscription in the console "
+                f"({catalog.get('manage_subscriptions_url', '')}) and re-run subscribe.py.")
+            result["fdp_offer_id"] = fdp_offers[0]["offer_id"]
+        say("Only one offer per listing can be active at a time. To switch offers, cancel "
             f"this subscription first: {catalog.get('manage_subscriptions_url', '')}")
         say("Next: resolve_model_package_arn.py")
         return finish(args, result, EXIT_OK)
 
-    # 2. offer -------------------------------------------------------------
-    try:
-        opts = disc.list_purchase_options(filters=[
-            {"filterType": "PRODUCT_ID", "filterValues": [pid]}]).get("purchaseOptions", [])
-    except (ClientError, BotoCoreError) as e:
-        fail_error("ListPurchaseOptions failed", e)
-    options = [{"offer_id": o.get("purchaseOptionId"), "name": o.get("purchaseOptionName"),
-                "badges": [b.get("badgeType") if isinstance(b, dict) else b for b in o.get("badges", [])]}
-               for o in opts]
-    result["purchase_options"] = options
     say(f"Purchase options for {pid}:")
     for o in options:
-        say(f"  {o['offer_id']}  badges={o['badges']}  name={o['name']!r}")
+        say(f"  {o['offer_id']}  {o['kind']:20} badges={o['badges']}  name={o['name']!r}")
     if args.offer_id:
         chosen = next((o for o in options if o["offer_id"] == args.offer_id), None)
         if chosen is None:
             fail_error(f"--offer-id {args.offer_id} is not among this product's purchase options")
+    elif fdp_offers and not args.no_fdp:
+        chosen = fdp_offers[0]
+        say("")
+        say("This account sees a Field Demonstration Program (FDP) offer, so it is an AWS account "
+            "enrolled in the program. Selecting it: the Deepgram software charge is not collected "
+            "under FDP (the rate card below shows the list price; that is how FDP offers are "
+            "published). SageMaker instance-hours are still billed by AWS. FDP is for AWS field "
+            "staff demonstrating the product — not for production workloads. Pass --no-fdp for the "
+            f"standard public offer. {FDP_DOC_URL}")
+        if len(fdp_offers) > 1:
+            say("note: more than one FDP offer; using the first. Pass --offer-id to pick.")
     else:
-        public = [o for o in options if "PRIVATE_PRICING" not in o["badges"]]
+        public = [o for o in options if o["kind"] == "public"]
         if not public:
             result["status"] = "no_public_offer"
             say("No public offer found. If you were sent a private offer, pass --offer-id; "
                 f"otherwise subscribe via the console: {catalog['marketplace_search_url']}")
             return finish(args, result, EXIT_NEGATIVE)
         if len(public) > 1:
-            say("note: more than one non-private offer; using the first. Pass --offer-id to pick.")
+            say("note: more than one public offer; using the first. Pass --offer-id to pick.")
         chosen = public[0]
+        if fdp_offers:
+            say("note: an FDP offer exists but --no-fdp was given; taking the standard public offer.")
     offer_id = chosen["offer_id"]
-    result["offer_id"] = offer_id
+    result.update(offer_id=offer_id, offer_kind=chosen["kind"])
+    say(f"Selected offer {offer_id}: {OFFER_KIND_LABEL[chosen['kind']]}")
 
     # 3. proposal + terms ----------------------------------------------------
     try:
@@ -210,7 +261,8 @@ def main() -> int:
 
     # 5. accept ----------------------------------------------------------------
     confirm_or_exit(args, f"ACCEPT the AWS Marketplace agreement for {prod['listing_name']} "
-                          f"({pid}) on offer {offer_id}. This subscribes the account "
+                          f"({pid}) on offer {offer_id} ({OFFER_KIND_LABEL[chosen['kind']]}). "
+                          f"This subscribes the account "
                           f"{'' if not args.no_free_trial else '(no free trial) '}— no charges until an endpoint runs.",
                     flag="--accept")
     try:
