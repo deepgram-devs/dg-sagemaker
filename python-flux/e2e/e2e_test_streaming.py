@@ -67,6 +67,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import subprocess
+import signal
+import os
 import sys
 import tempfile
 import time
@@ -409,6 +412,68 @@ def _threshold_matches(got, want, tol: float = 1e-6) -> bool:
     return got == want
 
 
+def _kill_process_group(proc: "subprocess.Popen") -> None:
+    """SIGTERM then SIGKILL the driver's whole process group."""
+    if not hasattr(os, "killpg"):          # non-POSIX: best effort
+        proc.kill()
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+        try:
+            proc.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _run_driver(cmd: list[str], timeout_s: float):
+    """Run the load driver; on timeout kill the WHOLE process group.
+
+    Returns (CompletedProcess, timed_out). On timeout the returncode is
+    whatever the killed process exited with (negative signal number).
+
+    `subprocess.run(..., timeout=)` kills only the DIRECT child. These commands
+    are `uv run ... <driver>.py`, so the direct child is `uv` and the driver
+    doing the streaming is a GRANDCHILD -- killing `uv` orphans it. The orphan
+    keeps opening connections and pushing audio at the endpoint long after the
+    scenario has been scored, which corrupts every scenario that runs after it
+    (and any other test sharing this machine's network) while looking like a
+    clean timeout in the report.
+
+    Observed 2026-09-17: a driver was still running 1h31m after its own
+    scenario timed out at 1207s, and was competing for local bandwidth with
+    every later measurement. The scenario that timed out was itself most
+    likely starved by an earlier orphan, so this misdiagnoses as an endpoint
+    fault.
+
+    `start_new_session=True` puts the child in a new process group so the
+    timeout path can signal the entire tree.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout_s)
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err), False
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        try:
+            out, err = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+        return subprocess.CompletedProcess(cmd, proc.returncode or -9, out or "", err or ""), True
+
 def run_scenario(
     scenario: FluxScenario,
     *,
@@ -445,15 +510,15 @@ def run_scenario(
     logger.info(f"[{scenario.name}] running: {' '.join(cmd)}")
 
     start = time.monotonic()
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
-    except subprocess.TimeoutExpired as e:
+    result, timed_out = _run_driver(cmd, timeout_s)
+    if timed_out:
         elapsed = time.monotonic() - start
         # Keep whatever the driver printed before the kill — without it a hung
         # scenario leaves no evidence at all (observed 2026-09-16: ramp_10x_step5
-        # timed out with no stdout/stderr files to read).
-        stdout_path.write_text((e.stdout or "") if isinstance(e.stdout, str) else (e.stdout or b"").decode(errors="replace"))
-        stderr_path.write_text((e.stderr or "") if isinstance(e.stderr, str) else (e.stderr or b"").decode(errors="replace"))
+        # timed out with no stdout/stderr files to read; that same run left an
+        # orphaned driver alive for over a day, which is what _run_driver fixes).
+        stdout_path.write_text(result.stdout)
+        stderr_path.write_text(result.stderr)
         return {
             "scenario": scenario.name, "ok": False, "wer": 1.0, "sdi": (0, 0, 0),
             "words": 0, "elapsed_s": elapsed,
