@@ -8,7 +8,7 @@ Python scripts for stress testing Deepgram Speech-to-Text (STT) endpoints deploy
 
 Two **end-to-end correctness drivers** sit on top of these scripts (in `e2e/`) as definitive promotion gates:
 
-- **`e2e/e2e_test_streaming.py`** — downloads `https://dpgr.am/spacewalk.wav`, multiplies it to ~15 min, drives `stt_wav_stress.py stream` through 10 scenarios (basic / sustained-concurrency / ramped / feature flags / adversarial close path), and validates every connection's `combined_final_text` against a known reference transcript via Word Error Rate.
+- **`e2e/e2e_test_streaming.py`** — downloads `https://dpgr.am/spacewalk.wav`, multiplies it to ~15 min, drives `stt_wav_stress.py stream` through 24 scenarios (basic / sustained-concurrency / ramped / feature flags / mid-stream `Configure` / adversarial close path), and validates every connection's `combined_final_text` against a known reference transcript via Word Error Rate.
 - **`e2e/e2e_test_batch.py`** — same fixtures, takes `--mode sync` or `--mode async` to match how the target endpoint is configured (a single batch endpoint serves only one transport). Sync mode runs five scenarios on the 25-second sample (≤ 25 MB body limit); async mode runs five scenarios on the long-form 15-min variant via S3 in/out (~76 MB, well over the sync cap), including summarize via fathom.
 
 ## Prerequisites
@@ -283,6 +283,9 @@ uv run stt_wav_stress.py stream your-endpoint-name --file audio.wav \
 | `--keyterms TERM,...` | Comma-separated keyterms to boost recognition (nova-3) | — |
 | `--redact ENTITY,...` | Comma-separated entity types to redact, e.g. `pii,ssn,email_address` | — |
 | `--interim-results true\|false` | Emit interim (partial) transcripts | `true` |
+| `--configure JSON` | Send a mid-stream [`Configure`](https://developers.deepgram.com/docs/configure), e.g. `'{"keyterms": ["Deepgram"]}'` (`[]` clears) or `'{"features": {"numerals": true}}'`; responses are counted in the summary and `--summary-jsonl` | — |
+| `--configure-after SECONDS` | Send `--configure` after this much audio (`0` = before any audio) | `5` |
+| `--configure-repeat N` | Send N copies back-to-back (N>1 exercises `CONFIGURE_ALREADY_PENDING`) | `1` |
 | `--use-close-stream` / `--no-use-close-stream` | Send a Deepgram [`CloseStream`](https://developers.deepgram.com/docs/close-stream) message before the WebSocket Close so the server flushes the final transcript tail; `--no-use-close-stream` exercises the bare WS Close path instead | on |
 | `--loop` | Loop the WAV file until `--duration` is reached or Ctrl+C | off |
 | `--duration SECONDS` | Stop after this many seconds | play file once |
@@ -548,7 +551,7 @@ The drivers live in `e2e/` alongside `e2e_test_common.py` (shared helpers); the 
 
 ### `e2e/e2e_test_streaming.py`
 
-Definitive correctness gate for a **streaming** endpoint. Subprocesses `stt_wav_stress.py stream` ten times with different argument sets — short-form, long-form, sustained-concurrency, ramped-concurrency, each major feature flag, and an adversarial bare-WS-close path — and reads each connection's `combined_final_text` out of the per-conn `--summary-jsonl` to compute WER.
+Definitive correctness gate for a **streaming** endpoint. Subprocesses `stt_wav_stress.py stream` once per scenario (24; `--list` prints them) — short-form, long-form, sustained-concurrency, ramped-concurrency, each major feature flag, mid-stream `Configure`, and an adversarial bare-WS-close path — and reads each connection's `combined_final_text` out of the per-conn `--summary-jsonl` to compute WER.
 
 ```bash
 uv run e2e/e2e_test_streaming.py your-streaming-endpoint-name --region us-east-2
@@ -574,6 +577,11 @@ uv run e2e/e2e_test_streaming.py your-endpoint --wer-threshold 0.03
 | `feature_diarize` | `--diarize true` — body unchanged, speaker tags added |
 | `feature_keyterms` | `--keyterms 'spacewalk,female'` — presence check on `spacewalk` |
 | `feature_redact_name` | `--redact name` — presence of redaction marker, WER skipped |
+| `configure_keyterms` | `Configure` keyterms at 5 s — `ConfigureSuccess` must echo the new list; stream keeps transcribing |
+| `configure_keyterms_clear` | `keyterm=Deepgram` at connect, then `Configure` `keyterms: []` — echo must be the empty list |
+| `configure_numerals` | `Configure` `features.numerals=true` before any audio — `first` must come back as `1st` |
+| `configure_keyterm_limit` | `Configure` with > 500 keyterm tokens — `CONFIGURE_KEYTERM_LIMIT_EXCEEDED`, stream stays open, WER unchanged |
+| `configure_already_pending` | two `Configure`s back-to-back — one `ConfigureSuccess` + `CONFIGURE_ALREADY_PENDING` |
 | `adversarial_bare_close` | `--no-use-close-stream` — bare WS close (relaxed WER 10 %) |
 | `reject_unknown_param` | `--extra bogus=true` — negative: PASSES only if the upgrade is rejected (400) and no audio streams; verifies the container's reject-unknown-params gate |
 

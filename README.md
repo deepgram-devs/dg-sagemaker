@@ -74,7 +74,7 @@ Scripts:
 
 End-to-end correctness gates ([`python-stt/e2e/`](python-stt/e2e/)) — wrap the stress scripts and score each connection's transcript against a known reference (`spacewalk.wav`) via Word Error Rate; intended as the promotion gate before an endpoint goes live:
 
-- [`e2e/e2e_test_streaming.py`](python-stt/e2e/e2e_test_streaming.py) — drives `stt_wav_stress.py stream` through ~10 scenarios (basic short/long-form, sustained + ramped concurrency, the major feature flags, an adversarial WebSocket-close path) and checks each connection's combined final transcript by WER
+- [`e2e/e2e_test_streaming.py`](python-stt/e2e/e2e_test_streaming.py) — drives `stt_wav_stress.py stream` through 24 scenarios (basic short/long-form, sustained + ramped concurrency, the major feature flags, mid-stream `Configure` keyterms/numerals, an adversarial WebSocket-close path) and checks each connection's combined final transcript by WER
 - [`e2e/e2e_test_batch.py`](python-stt/e2e/e2e_test_batch.py) — `--mode sync` (25 s sample via `invoke_endpoint`, ≤ 25 MB) or `--mode async` (~15 min / ~76 MB via `invoke_endpoint_async` + S3, incl. summarize); validates every returned transcript by WER
 
 ### Java

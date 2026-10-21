@@ -69,7 +69,7 @@ timeout; the others fit easily in a single agent turn.
 
 | Script | Total wall-clock | Longest scenario | Notes |
 |---|---|---|---|
-| `python-stt/e2e/e2e_test_streaming.py` | **~17–18 min** | `concurrent_10x_15min` ≈ **915 s** | Plays a ~15-min file at real-time across 10 concurrent WS connections. Do not run inside a short-lived agent subprocess — run as a backgrounded shell command with a 40+ min timeout and poll for the `PASSED:.*FAILED:` line in the tail. |
+| `python-stt/e2e/e2e_test_streaming.py` | **~20 min** | `concurrent_10x_15min` ≈ **915 s** | 24 scenarios (the five `configure_*` rows add ~2.5 min). Plays a ~15-min file at real-time across 10 concurrent WS connections. Do not run inside a short-lived agent subprocess — run as a backgrounded shell command with a 40+ min timeout and poll for the `PASSED:.*FAILED:` line in the tail. |
 | `python-stt/e2e/e2e_test_batch.py` | ~1 min | summarize/topics scenarios ~4 s | 22 scenarios, mostly 1–2 s each. Safe to run inline. |
 | `python-tts/e2e/e2e_test_batch.py` | ~1.5 min | speed_duration ~12 s | 20 scenarios. Safe inline. |
 | `python-tts/e2e/e2e_test_streaming.py` | ~1.5 min | multi_phrase_flush ~17 s | 8 scenarios. Safe inline. |

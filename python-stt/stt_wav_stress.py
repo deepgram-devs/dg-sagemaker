@@ -224,6 +224,13 @@ class DeepgramSageMakerConnection:
         self.last_recv_at: float | None = None
         self.close_observed_at: float | None = None
         self.close_reason: str | None = None
+        # Mid-stream Configure responses. ConfigureSuccess echoes the keyterms /
+        # language_hints now in effect (absent when the Configure did not touch
+        # them); ConfigureFailure carries a machine-readable `code`. Recorded in
+        # arrival order so the e2e driver can assert on the exact echo.
+        self.configure_sent = 0
+        self.configure_acks: list[dict] = []
+        self.configure_failures: list[dict] = []
         # Guards against closing the input stream / sending CloseStream more
         # than once across the EOF, error, and end_session paths.
         self._input_closed = False
@@ -334,6 +341,23 @@ class DeepgramSageMakerConnection:
         return await self._send_payload_bytes(
             message, self.control_data_type, require_active=require_active
         )
+
+    async def send_configure(self, body: dict):
+        """Send a ``Configure`` control message mid-stream
+        (https://developers.deepgram.com/docs/configure).
+
+        ``body`` is merged under ``{"type": "Configure"}`` — e.g.
+        ``{"keyterms": ["Deepgram"]}`` replaces the keyterm list (``[]`` clears
+        it), ``{"features": {"numerals": true}}`` toggles numerals. Every
+        Configure gets exactly one ``ConfigureSuccess`` or ``ConfigureFailure``;
+        a rejected one leaves the stream open on its previous settings.
+        """
+        message = json.dumps({"type": "Configure", **body}).encode("utf-8")
+        sent = await self._send_payload_bytes(message, self.control_data_type)
+        if sent:
+            self.configure_sent += 1
+            logger.info(f"[Connection {self.connection_id}] Sent Configure: {body}")
+        return sent
 
     async def _send_keep_alives(self):
         """Send Deepgram KeepAlive control messages while the stream is open."""
@@ -517,6 +541,19 @@ class DeepgramSageMakerConnection:
         if self.raw:
             self._write_fn(f"[Conn {self.connection_id}] RAW {raw}")
 
+        if msg_type == "ConfigureSuccess":
+            ack = {k: parsed[k] for k in ("keyterms", "language_hints") if k in parsed}
+            self.configure_acks.append(ack)
+            self._write_fn(f"[Conn {self.connection_id}] ConfigureSuccess {ack}")
+            return
+        if msg_type == "ConfigureFailure":
+            # Not a stream error: the server keeps the stream open on its
+            # previous settings, so this must not mark the connection errored.
+            failure = {"code": parsed.get("code"), "description": parsed.get("description")}
+            self.configure_failures.append(failure)
+            self._write_fn(f"[Conn {self.connection_id}] ConfigureFailure {failure}")
+            return
+
         if 'channel' not in parsed:
             # Surface endpoint error messages (e.g. {"error": "...", "message": "..."})
             err_msg = parsed.get('error') or parsed.get('message')
@@ -570,6 +607,9 @@ class DeepgramSageMakerConnection:
             "combined_final_text": " ".join(self.final_transcript_parts).strip(),
             "message_type_counts": dict(self.message_type_counts),
             "unknown_message_count": self.unknown_message_count,
+            "configure_sent": self.configure_sent,
+            "configure_acks": list(self.configure_acks),
+            "configure_failures": list(self.configure_failures),
             "first_final_latency_s": _delta(self.session_start_at, self.first_final_at),
             "session_duration_s": _delta(self.session_start_at, self.close_observed_at),
             "ring_buffer_tail": [
@@ -657,9 +697,17 @@ class MultiConnectionWAVClient:
 
     def __init__(self, endpoint_name, wav_path, region=DEFAULT_REGION, num_connections=1,
                  use_close_stream=True, raw=False, ring_size: int = 50,
-                 control_data_type: str = "UTF8", fips: bool = False):
+                 control_data_type: str = "UTF8", fips: bool = False,
+                 configure_body: dict | None = None, configure_after_s: float = 0.0,
+                 configure_repeat: int = 1):
         self.endpoint_name = endpoint_name
         self.wav_path = wav_path
+        # One-shot mid-stream Configure: `configure_repeat` copies of
+        # `configure_body`, sent back-to-back once `configure_after_s` seconds
+        # of audio have been sent (0 = before the first audio chunk).
+        self.configure_body = configure_body
+        self.configure_after_s = configure_after_s
+        self.configure_repeat = configure_repeat
         self.region = region
         self.num_connections = num_connections
         self.use_close_stream = use_close_stream
@@ -934,6 +982,7 @@ class MultiConnectionWAVClient:
         play_count = 0
         total_chunks = 0
         stream_start = time.monotonic()
+        configure_pending = self.configure_body is not None
 
         while self.is_active and conn.is_active:
             wf = self._open_wav()
@@ -947,6 +996,11 @@ class MultiConnectionWAVClient:
                     raw = wf.readframes(frames_per_chunk)
                     if not raw:
                         break
+
+                    if configure_pending and total_chunks * chunk_duration >= self.configure_after_s:
+                        configure_pending = False
+                        for _ in range(self.configure_repeat):
+                            await conn.send_configure(self.configure_body)
 
                     await conn.send_audio_chunk(raw)
                     total_chunks += 1
@@ -1573,6 +1627,20 @@ async def run_stream(args) -> int:
         k, v = pair.split("=", 1)
         extra_params[k.strip()] = v.strip()
 
+    configure_body = None
+    if args.configure:
+        try:
+            configure_body = json.loads(args.configure)
+        except json.JSONDecodeError as e:
+            print(f"ERROR: --configure is not valid JSON: {e}")
+            return 1
+        if not isinstance(configure_body, dict):
+            print("ERROR: --configure must be a JSON object, e.g. '{\"keyterms\": [\"Deepgram\"]}'")
+            return 1
+    if args.configure_repeat < 1:
+        print("ERROR: --configure-repeat must be a positive integer (minimum 1)")
+        return 1
+
     if args.connections < 1:
         print("ERROR: --connections must be a positive integer (minimum 1)")
         return 1
@@ -1592,6 +1660,9 @@ async def run_stream(args) -> int:
         ring_size=args.ring_size,
         control_data_type=args.control_data_type,
         fips=args.fips,
+        configure_body=configure_body,
+        configure_after_s=args.configure_after,
+        configure_repeat=args.configure_repeat,
     )
 
     try:
@@ -1641,6 +1712,10 @@ async def run_stream(args) -> int:
         print(f"Keywords:     {', '.join(keywords_list)}")
     if keyterms_list:
         print(f"Keyterms:     {', '.join(keyterms_list)}")
+    if configure_body is not None:
+        shown = args.configure if len(args.configure) <= 120 else args.configure[:117] + "..."
+        repeat = f" x{args.configure_repeat}" if args.configure_repeat > 1 else ""
+        print(f"Configure:    at {args.configure_after:g}s{repeat}: {shown}")
     print("=" * 60)
 
     def signal_handler(sig, frame):
@@ -1750,6 +1825,12 @@ async def run_stream(args) -> int:
         print(f"Unknown messages:   {total_unknown}")
         if agg_types:
             print(f"Msg-type histogram: {dict(agg_types)}")
+        if configure_body is not None:
+            print(
+                f"Configure sent/ok/fail: {sum(c.configure_sent for c in conns)}/"
+                f"{sum(len(c.configure_acks) for c in conns)}/"
+                f"{sum(len(c.configure_failures) for c in conns)}"
+            )
         if ffl:
             ffl_sorted = sorted(ffl)
             p50 = ffl_sorted[len(ffl_sorted) // 2]
@@ -2012,6 +2093,37 @@ async def main() -> int:
             "reaches the API only via the container's binary-control reframing "
             "fallback — select it to exercise that path (default: UTF8). "
             "Audio chunks are always BINARY."
+        ),
+    )
+    stream_parser.add_argument(
+        "--configure",
+        default=None,
+        metavar="JSON",
+        help=(
+            "Send a mid-stream Configure message with this JSON body, e.g. "
+            "'{\"keyterms\": [\"Deepgram\", \"customer service\"]}' (replaces the "
+            "keyterm list; [] clears it) or '{\"features\": {\"numerals\": true}}'. "
+            "The server answers each one with ConfigureSuccess or ConfigureFailure "
+            "(https://developers.deepgram.com/docs/configure). Sent with "
+            "--control-data-type."
+        ),
+    )
+    stream_parser.add_argument(
+        "--configure-after",
+        type=float,
+        default=5.0,
+        metavar="SECONDS",
+        help="Send --configure once this many seconds of audio have been sent (0 = before any audio; default: 5)",
+    )
+    stream_parser.add_argument(
+        "--configure-repeat",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Send N copies of --configure back-to-back without waiting for the "
+            "response (default: 1). Only one Configure may be pending at a time, "
+            "so N>1 exercises the CONFIGURE_ALREADY_PENDING rejection."
         ),
     )
     stream_parser.add_argument(

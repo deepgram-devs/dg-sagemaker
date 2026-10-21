@@ -5,7 +5,8 @@ End-to-end correctness + red-team test for a streaming SageMaker STT endpoint.
 Drives `stt_wav_stress.py stream` through a sequence of scenarios — basic
 short-form, basic long-form, sustained-concurrency, ramped-concurrency, each
 of the major feature flags (diarize / keyterms / redact / interim-results),
-and an adversarial bare-WebSocket-close path — then validates each
+mid-stream Configure (keyterm replace / clear / limit / one-at-a-time, and
+numerals), and an adversarial bare-WebSocket-close path — then validates each
 connection's `combined_final_text` against a known reference transcript via
 Word Error Rate. Designed to be the definitive correctness gate for a
 streaming endpoint before promoting it.
@@ -136,6 +137,17 @@ class StreamScenario:
     # parity with the batch driver so a future language-gated feature has
     # somewhere to go.
     supported_languages: list[str] | None = None
+    # Mid-stream Configure assertions (scenario passes `--configure` in
+    # extra_args). `expect_configure_acks` is the exact ConfigureSuccess count;
+    # `expect_applied_keyterms` must equal the keyterms the last
+    # ConfigureSuccess echoed (an ack alone would also pass a Configure the
+    # server ignored); `expect_configure_failure_code` must appear verbatim as
+    # a ConfigureFailure `code`. When it is None, any ConfigureFailure FAILS
+    # the scenario. The stream must keep transcribing either way — the usual
+    # finals / WER gates still apply.
+    expect_configure_acks: int | None = None
+    expect_applied_keyterms: list[str] | None = None
+    expect_configure_failure_code: str | None = None
     notes: str = ""
 
 
@@ -305,6 +317,69 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
             # If the red is unwanted, gate the scenario to monolingual bundles
             # explicitly rather than weakening the assertion.
             notes="nova-3 only — `keyterm`, NOT `keywords`; multilingual deletes the term (known, see comment)",
+        ),
+        # ---- Mid-stream Configure (keyterms / numerals, no reconnect) ----
+        # The replacement keyterms are absent from the clip on purpose: the
+        # assertion is the server's echo of the list now in effect, and WER
+        # stays at baseline. Using "spacewalk" would inherit feature_keyterm's
+        # known multilingual deletion and fail for a reason unrelated to
+        # Configure.
+        StreamScenario(
+            name="configure_keyterms",
+            description="Configure keyterms mid-stream (at 5 s) → ConfigureSuccess echoes them",
+            connections=1,
+            extra_args=["--configure", json.dumps({"keyterms": ["Deepgram", "customer service"]})],
+            expect_configure_acks=1,
+            expect_applied_keyterms=["Deepgram", "customer service"],
+            notes="needs an API release with nova-3 Configure keyterms",
+        ),
+        StreamScenario(
+            name="configure_keyterms_clear",
+            description="keyterm=Deepgram at connect, Configure keyterms [] → list cleared",
+            connections=1,
+            extra_args=["--keyterms", "Deepgram", "--configure", json.dumps({"keyterms": []})],
+            expect_configure_acks=1,
+            expect_applied_keyterms=[],
+            notes="a keyterms array replaces the full list, including the keyterm query params",
+        ),
+        StreamScenario(
+            name="configure_numerals",
+            description="Configure features.numerals=true before any audio → 'first' -> '1st'",
+            connections=1,
+            extra_args=[
+                "--configure", json.dumps({"features": {"numerals": True}}),
+                "--configure-after", "0",
+            ],
+            expect_configure_acks=1,
+            # Same gate and rationale as feature_numerals: the one substitution
+            # the feature creates is the thing being tested.
+            wer_threshold=0.1,
+            presence_check="1st",
+            notes="numerals toggled via Configure instead of the query string",
+        ),
+        StreamScenario(
+            name="configure_keyterm_limit",
+            description="Configure 250 keyterms (> 500-token cap) → ConfigureFailure, stream continues",
+            connections=1,
+            extra_args=["--configure", json.dumps(
+                {"keyterms": [f"telemetry checkpoint {i}" for i in range(250)]}
+            )],
+            expect_configure_acks=0,
+            expect_configure_failure_code="CONFIGURE_KEYTERM_LIMIT_EXCEEDED",
+            notes="a rejected Configure must not close the stream",
+        ),
+        StreamScenario(
+            name="configure_already_pending",
+            description="2 Configures back-to-back → 1 ConfigureSuccess + CONFIGURE_ALREADY_PENDING",
+            connections=1,
+            extra_args=[
+                "--configure", json.dumps({"keyterms": ["Deepgram"]}),
+                "--configure-repeat", "2",
+            ],
+            expect_configure_acks=1,
+            expect_applied_keyterms=["Deepgram"],
+            expect_configure_failure_code="CONFIGURE_ALREADY_PENDING",
+            notes="one Configure at a time; the first still applies",
         ),
         StreamScenario(
             name="feature_replace",
@@ -653,6 +728,28 @@ def run_scenario(
         tail_ok = scenario.tail_check.lower() in combined.lower()
         notes_parts.append(f"tail({scenario.tail_check})={'ok' if tail_ok else 'TRUNCATED'}")
 
+    configure_ok = True
+    if scenario.expect_configure_acks is not None:
+        acks = [a for r in rows for a in (r.get("configure_acks") or [])]
+        failures = [f for r in rows for f in (r.get("configure_failures") or [])]
+        codes = [f.get("code") for f in failures]
+        notes_parts.append(f"configure ok/fail={len(acks)}/{len(failures)}")
+        if len(acks) != scenario.expect_configure_acks:
+            configure_ok = False
+            notes_parts.append(f"ACKS_MISMATCH (want {scenario.expect_configure_acks})")
+        if scenario.expect_applied_keyterms is not None:
+            echoed = acks[-1].get("keyterms") if acks else None
+            if echoed != scenario.expect_applied_keyterms:
+                configure_ok = False
+                notes_parts.append(f"KEYTERMS_ECHO_MISMATCH (got {echoed!r})")
+        if scenario.expect_configure_failure_code is not None:
+            if scenario.expect_configure_failure_code not in codes:
+                configure_ok = False
+                notes_parts.append(f"FAILURE_CODE_MISSING (got {codes!r})")
+        elif failures:
+            configure_ok = False
+            notes_parts.append(f"UNEXPECTED_FAILURE {failures!r}")
+
     if tolerated:
         notes_parts.append(
             f"BUNDLE-GAP: '{scenario.tolerated_error_substring}' "
@@ -669,6 +766,7 @@ def run_scenario(
             and w_ratio <= scenario.wer_threshold
             and presence_ok
             and tail_ok
+            and configure_ok
         )
     if scenario.name == "feature_interim_results" and interim_total == 0 and not tolerated:
         ok = False
