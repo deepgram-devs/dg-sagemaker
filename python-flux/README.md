@@ -345,6 +345,7 @@ uv run e2e/e2e_test_streaming.py --list --model flux-general-multi
 | `feature_encoding_linear16` | explicit `--encoding linear16` |
 | `feature_mip_opt_out` | `mip_opt_out=true` (smoke) |
 | `feature_configure_thresholds` | mid-stream `Configure` → asserts `ConfigureSuccess`; PASS-WITH-NOTE on `CloseStream`-only bundles that reject `Configure` |
+| `feature_configure_keyterms` | no keyterms at connect; mid-stream `Configure` adds them and they stay until the stream closes → asserts `ConfigureSuccess` echoes exactly the new list |
 | `feature_configure_failure` | mid-stream `Configure` with `eager > eot` → asserts `ConfigureFailure`; PASS-WITH-NOTE on bundles that reject `Configure` |
 | `feature_keepalive_idle` | `--idle-before-audio 65 --keepalive-interval 10` — holds the stream open through a 65 s silence gap with tiny binary keepalive frames, then transcribes; asserts WER + `session_duration ≥ 60 s`. Post-idle transcription is the proof the connection survived |
 | `feature_finalize` | `--finalize-at-end` — PASS-WITH-NOTE on bundles that reject `Finalize` as an unknown variant |
@@ -364,10 +365,12 @@ Parameter coverage is scoped to the Flux docs
 **In-band control-message support is bundle-versioned.** Observed against the
 deployed packages: `flux-english-20260311` accepts only `CloseStream`;
 `flux-multi-20260417` adds `Configure`; neither accepts `Finalize` (rejected as
-`UNPARSABLE_CLIENT_MESSAGE: unknown variant`). The `feature_configure_*` /
-`feature_finalize` scenarios PASS-WITH-NOTE when the message is rejected and
-pass outright once a bundle implements it — so the suite stays green across
-versions without hiding the gap. `feature_keepalive_idle` uses no control
+`UNPARSABLE_CLIENT_MESSAGE: unknown variant`). The
+`feature_configure_thresholds` / `feature_configure_failure` / `feature_finalize`
+scenarios PASS-WITH-NOTE when the message is rejected and pass outright once a
+bundle implements it — so the suite stays green across versions without hiding
+the gap. `feature_configure_keyterms` is deliberately NOT tolerant: it fails
+unless the keyterms are actually applied. `feature_keepalive_idle` uses no control
 message (just binary frames), so it is not bundle-gated: it fails for real if a
 connection can't survive a 60 s idle gap.
 

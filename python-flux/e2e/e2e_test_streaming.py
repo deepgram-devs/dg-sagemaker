@@ -140,6 +140,9 @@ class FluxScenario:
     expect_configure_success: bool = False
     expect_configure_failure: bool = False
     expect_applied_thresholds: dict[str, float] | None = None
+    # With `expect_configure_success`: the keyterms the ConfigureSuccess echo
+    # reports as now in effect must equal this list (order-insensitive).
+    expect_applied_keyterms: list[str] | None = None
     expect_configure_failure_code: str | None = None
     expect_languages: bool = False
     min_session_duration_s: float | None = None
@@ -277,6 +280,18 @@ def default_scenarios(model: str = DEFAULT_MODEL) -> list[FluxScenario]:
             tolerated_error_substring="Configure",
             notes="ConfigureSuccess expected; PASS-WITH-NOTE on bundles that reject "
                   "Configure as an unknown variant (e.g. CloseStream-only builds)",
+        ),
+        # Keyterms added mid-stream and KEPT until the stream closes — the
+        # common voice-agent pattern. The keyterms are absent from the clip, so
+        # WER stays at baseline and the assertion is the server's echo of the
+        # list now in effect.
+        FluxScenario(
+            name="feature_configure_keyterms",
+            description="no keyterms at connect; mid-stream Configure adds them and they stay to close",
+            extra_args=["--reconfigure-after", "5", "--reconfigure-keyterms", "Deepgram,customer service"],
+            expect_configure_success=True,
+            expect_applied_keyterms=["Deepgram", "customer service"],
+            notes="ConfigureSuccess must echo the new keyterm list",
         ),
         FluxScenario(
             name="feature_configure_failure",
@@ -576,6 +591,14 @@ def run_scenario(
                         f"{k}={applied.get(k)}" for k in scenario.expect_applied_thresholds
                     )
                 )
+
+        if scenario.expect_applied_keyterms is not None:
+            echoed = cfg_acks[-1].get("keyterms") if cfg_acks else None
+            kt_ok = cfg and sorted(echoed or []) == sorted(scenario.expect_applied_keyterms)
+            checks.append(kt_ok)
+            notes_parts.append(
+                f"applied_keyterms={'ok' if kt_ok else f'MISMATCH (got {echoed!r})'}"
+            )
 
     if scenario.expect_configure_failure:
         cfg = cfg_fail >= 1
