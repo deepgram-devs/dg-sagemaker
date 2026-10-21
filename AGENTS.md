@@ -71,10 +71,10 @@ timeout; the others fit easily in a single agent turn.
 |---|---|---|---|
 | `python-stt/e2e/e2e_test_streaming.py` | **~20 min** | `concurrent_10x_15min` ≈ **915 s** | 24 scenarios (the five `configure_*` rows add ~2.5 min). Plays a ~15-min file at real-time across 10 concurrent WS connections. Do not run inside a short-lived agent subprocess — run as a backgrounded shell command with a 40+ min timeout and poll for the `PASSED:.*FAILED:` line in the tail. |
 | `python-stt/e2e/e2e_test_batch.py` | ~1 min | summarize/topics scenarios ~4 s | 22 scenarios, mostly 1–2 s each. Safe to run inline. |
-| `python-tts/e2e/e2e_test_batch.py` | ~1.5 min | speed_duration ~12 s | 20 scenarios. Safe inline. |
-| `python-tts/e2e/e2e_test_streaming.py` | ~1.5 min | multi_phrase_flush ~17 s | 8 scenarios. Safe inline. |
-| `python-flux-tts/e2e/e2e_test_batch.py` | ~3 min | `speed`, `concurrent_5` | 7 scenarios. Safe inline. |
-| `python-flux-tts/e2e/e2e_test_streaming.py` | ~4 min | `speed` ~60 s, `long_turn` | 10 scenarios. `speed` renders the same text at the default rate and at `MAX_SPEED` and compares durations — `SPEED_SAMPLES` (3) paired renders, judged on the MEDIAN, so it costs SIX turns not two. Synthesis is stochastic and a single pair is not a verdict. Safe inline. |
+| `python-tts/e2e/e2e_test_batch.py` | ~1.5 min | speed_duration ~12 s | 21 scenarios (per-language voice rows vary). Safe inline. |
+| `python-tts/e2e/e2e_test_streaming.py` | ~1.5 min | multi_phrase_flush ~17 s | 10 scenarios. Safe inline. |
+| `python-flux-tts/e2e/e2e_test_batch.py` | ~3.5 min | `speed`, `concurrent_5` | 15 scenarios, including one per output encoding (mp3/opus/flac/aac/mulaw/alaw/linear16 16 kHz). Safe inline. |
+| `python-flux-tts/e2e/e2e_test_streaming.py` | ~4.5 min | `speed` ~60 s, `long_turn` | 14 scenarios, including mulaw/alaw/linear16 16 kHz and a negative check that mp3/opus/aac/flac are refused on the WebSocket. `speed` renders the same text at the default rate and at `MAX_SPEED` and compares durations — `SPEED_SAMPLES` (3) paired renders, judged on the MEDIAN, so it costs SIX turns not two. Synthesis is stochastic and a single pair is not a verdict. Safe inline. |
 
 Wall-clocks measured against single-GPU (STT, Flux TTS) and multi-GPU (Aura-2
 TTS) SageMaker endpoints. Network and instance class shift the numbers, but the

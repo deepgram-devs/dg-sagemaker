@@ -220,9 +220,11 @@ class FluxTtsStream:
 
         Only params that are BOTH valid `/v2/speak` query params AND carried in
         the deployment's rate card will get through; anything else is a 400.
+        A param passed as None is omitted (e.g. `sample_rate=None`).
         """
         query = {"model": voice, "encoding": ENCODING, "sample_rate": SAMPLE_RATE}
         query.update(params)
+        query = {k: v for k, v in query.items() if v is not None}
         query_string = "&".join(f"{k}={v}" for k, v in query.items())
 
         self.session_start_at = time.monotonic()
@@ -453,9 +455,13 @@ def invoke_batch(
     (defaulting to `v1/listen` when absent, which would 400 for TTS).
     `Content-Type: application/json` matters too: the server needs it to read the
     `{"text": ...}` body, and the container forwards `content-type` through to it.
+
+    A param passed as None is omitted: compressed encodings (mp3/opus/aac/flac)
+    reject `sample_rate` with a 400, so they call with `sample_rate=None`.
     """
     query = {"model": voice, "encoding": ENCODING, "sample_rate": SAMPLE_RATE}
     query.update(params)
+    query = {k: v for k, v in query.items() if v is not None}
     query_string = "&".join(f"{k}={v}" for k, v in query.items())
 
     started = time.monotonic()

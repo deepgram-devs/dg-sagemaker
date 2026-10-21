@@ -32,6 +32,7 @@ from botocore.config import Config as BotoConfig
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from e2e.e2e_test_common import (  # noqa: E402
+    BATCH_ENCODINGS,
     LONG_TEXT,
     MAX_SPEED,
     OUT_OF_RANGE_SPEED,
@@ -40,6 +41,8 @@ from e2e.e2e_test_common import (  # noqa: E402
     REFERENCE_TEXT,
     SAMPLE_RATE,
     audio_verdict,
+    encoded_verdict,
+    parse_wav,
     print_summary_table,
     select_scenarios,
 )
@@ -202,6 +205,42 @@ def sc_wav_container(rt, ep, voice):
     return row
 
 
+def _encoding_scenario(name: str, params: dict, expect_container: str | None):
+    """One output encoding: enough bytes in the expected container (see
+    BATCH_ENCODINGS for why a byte floor, not the status code, is the check)."""
+    def sc(rt, ep, voice):
+        t0 = time.monotonic()
+        audio, _ = invoke_batch(rt, ep, REFERENCE_TEXT, voice, **params)
+        ok, note = encoded_verdict(audio, expect_container)
+        return {
+            "scenario": name,
+            "ok": ok,
+            "notes": note,
+            "bytes": len(audio),
+            "duration_s": 0.0,
+            "rms": 0.0,
+            "billable_chars": "",
+            "elapsed_s": time.monotonic() - t0,
+        }
+    return sc
+
+
+def sc_encoding_linear16_16k(rt, ep, voice):
+    """A non-default linear16 rate: audible audio AND a WAV header that says 16 kHz."""
+    t0 = time.monotonic()
+    audio, meta = invoke_batch(rt, ep, REFERENCE_TEXT, voice, sample_rate=16000)
+    row = _row("encoding_linear16_16k", audio, meta, t0)
+    if row["ok"]:
+        try:
+            sr = parse_wav(audio)["sample_rate"]
+        except Exception as e:  # noqa: BLE001
+            row["ok"], row["notes"] = False, f"WAV parse failed: {e}"[:80]
+        else:
+            row["ok"] = sr == 16000
+            row["notes"] = f"sample_rate={sr}" + ("" if row["ok"] else " (asked for 16000)")
+    return row
+
+
 def sc_unknown_param(rt, ep, voice):
     """NEGATIVE control — see the streaming battery's note. A bogus param must be
     a 400, not silently accepted."""
@@ -295,6 +334,8 @@ SCENARIOS = {
     "speed": sc_speed,
     "speed_out_of_range": sc_speed_out_of_range,
     "wav_container": sc_wav_container,
+    "encoding_linear16_16k": sc_encoding_linear16_16k,
+    **{name: _encoding_scenario(name, params, expect) for name, params, expect in BATCH_ENCODINGS},
     "unknown_param": sc_unknown_param,
     "aura_model_rejected": sc_aura_model_rejected,
     "concurrent_5": sc_concurrent_5,

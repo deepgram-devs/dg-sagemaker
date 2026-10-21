@@ -161,6 +161,48 @@ def linear16_duration_and_rms(data: bytes, requested_sample_rate: int) -> dict:
     }
 
 
+# Output encodings beyond the linear16 default, as `/v2/speak` serves them
+# (checked against api.deepgram.com, 2026-10-21):
+#   - batch accepts all of them; mp3/opus/aac/flac reject `sample_rate` (400),
+#     so those requests omit it;
+#   - the WebSocket accepts linear16/mulaw/alaw only and rejects mp3/opus/aac/flac
+#     at the upgrade.
+# AAC comes back as a raw codec stream with no magic bytes, so a byte floor is
+# the only check — and it is the one that matters: a broken encoder returns
+# HTTP 200 with an EMPTY body, which no status-code check catches.
+BATCH_ENCODINGS = [
+    # (scenario name, query params, expected container or None for bytes-only)
+    ("encoding_mp3", {"encoding": "mp3", "sample_rate": None}, "mpeg"),
+    ("encoding_opus", {"encoding": "opus", "sample_rate": None}, "ogg"),
+    ("encoding_flac", {"encoding": "flac", "sample_rate": None}, "flac"),
+    ("encoding_aac", {"encoding": "aac", "sample_rate": None}, None),
+    ("encoding_mulaw_wav", {"encoding": "mulaw", "sample_rate": 8000, "container": "wav"}, "wav"),
+    ("encoding_alaw_wav", {"encoding": "alaw", "sample_rate": 8000, "container": "wav"}, "wav"),
+]
+STREAM_ENCODINGS = [
+    ("encoding_mulaw_8k", {"encoding": "mulaw", "sample_rate": 8000}, None),
+    ("encoding_alaw_8k", {"encoding": "alaw", "sample_rate": 8000}, None),
+]
+STREAM_REJECTED_ENCODINGS = ["mp3", "opus", "aac", "flac"]
+# Floor for a non-linear16 response to REFERENCE_TEXT. Generous on purpose:
+# companded 8 kHz audio is 8000 bytes/s and the reference text runs ~10 s.
+ENCODED_MIN_BYTES = 2000
+
+
+def encoded_verdict(data: bytes, expect_container: str | None) -> tuple[bool, str]:
+    """`(ok, note)` for a non-linear16 response: enough bytes, right container.
+
+    RMS is not computed — it is meaningless on compressed or companded bytes.
+    """
+    container = sniff_container(data)
+    note = f"container={container} bytes={len(data)}"
+    if len(data) < ENCODED_MIN_BYTES:
+        return False, f"only {len(data)} bytes (< {ENCODED_MIN_BYTES}) — " + note
+    if expect_container and container != expect_container:
+        return False, f"expected container={expect_container}, " + note
+    return True, note
+
+
 def audio_verdict(data: bytes, sample_rate: int = SAMPLE_RATE) -> tuple[bool, str, dict]:
     """`(ok, note, stats)` for a synthesis response.
 

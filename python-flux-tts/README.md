@@ -48,6 +48,23 @@ Judge by the `PASS`/`FAIL` lines in the summary table, not by any "Errored"
 count — the SageMaker bidirectional-streaming transport reports a teardown error
 on essentially every connection, even on success.
 
+## Output encodings
+
+Both batteries cover every output encoding `/v2/speak` serves on their transport:
+
+| transport | scenarios | check |
+|---|---|---|
+| batch | `encoding_mp3` / `encoding_opus` / `encoding_flac` | enough bytes, right container magic |
+| batch | `encoding_aac` | enough bytes (AAC is a raw codec stream with no magic bytes) |
+| batch | `encoding_mulaw_wav` / `encoding_alaw_wav` | 8 kHz, WAV container |
+| both | `encoding_linear16_16k` | audible linear16 at 16 kHz |
+| streaming | `encoding_mulaw_8k` / `encoding_alaw_8k` | enough bytes (companded, no header) |
+| streaming | `compressed_encoding_rejected` | mp3/opus/aac/flac refused on the WebSocket |
+
+The byte floor is the check that matters. A broken encoder returns HTTP 200
+with an empty body, which no status-code check catches. mp3/opus/aac/flac
+reject `sample_rate`, so those requests omit it.
+
 ## Voices
 
 The model string is `flux-<voice>-en`; `flux-alexis-en` is the default used by

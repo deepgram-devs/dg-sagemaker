@@ -150,6 +150,14 @@ def default_scenarios(language: str, voice_coverage_n: int = 3) -> list[TTSStrea
             notes="bytes-only check for non-linear16",
         ),
         TTSStreamScenario(
+            name="encoding_alaw_8k",
+            description="encoding=alaw sample_rate=8000 (telephony; streaming-supported)",
+            extra={"encoding": "alaw", "sample_rate": "8000"},
+            check_rms=False,  # companded — RMS-on-raw is meaningless
+            tolerated_error_substring="encoding",
+            notes="bytes-only check for non-linear16",
+        ),
+        TTSStreamScenario(
             name="speed_fast",
             description="speed=1.4 over the websocket transport (voice control)",
             extra={"speed": "1.4"},

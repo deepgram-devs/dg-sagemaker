@@ -200,7 +200,7 @@ uv run e2e/e2e_test_batch.py --list
 | `default_format` | records the server's default output format (empirically **mp3** on current bundles) |
 | `voice_aura2_orion` / `voice_aura1_asteria` | alternate Aura-2 / legacy Aura-1 voices (PASS-WITH-NOTE if unbundled) |
 | `encoding_linear16_wav` / `encoding_linear16_raw` | WAV container vs bare PCM (`container=none`) |
-| `encoding_mp3` / `encoding_flac` / `encoding_opus_ogg` / `encoding_mulaw_wav` | each codec's container magic bytes |
+| `encoding_mp3` / `encoding_flac` / `encoding_opus_ogg` / `encoding_mulaw_wav` / `encoding_alaw_wav` | each codec's container magic bytes |
 | `encoding_aac` | AAC (raw codec stream — bytes-only check) |
 | `sample_rate_48000` / `sample_rate_16000` | WAV sample rate matches the request |
 | `bit_rate_mp3_32000` | `bit_rate` accepted for mp3 |
@@ -225,7 +225,7 @@ uv run e2e/e2e_test_streaming.py --list
 | `basic` / `concurrent_5` | `Speak`→audio + `Flushed`; 5-way concurrency |
 | `multi_phrase_flush` | 3 phrases — multiple `Flushed` acks (Speak→Flush→Flushed loop) |
 | `encoding_linear16_24k` | explicit linear16 @ 24 kHz — non-silent audio |
-| `encoding_mulaw_8k` | streaming-supported companded codec (bytes-only check) |
+| `encoding_mulaw_8k` / `encoding_alaw_8k` | streaming-supported companded codecs (bytes-only check) |
 | `speed_fast` | `speed=1.4` over the websocket — non-silent audio when supported; PASS-WITH-NOTE on bundles that silently drop `speed` (no audio → flush-ack timeout) |
 | `voice_alt` | alternate voice (PASS-WITH-NOTE if unbundled) |
 | `mip_opt_out` | passthrough flag (smoke) |

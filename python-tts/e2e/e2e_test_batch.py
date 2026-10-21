@@ -210,6 +210,14 @@ def default_scenarios(language: str, voice_coverage_n: int = 3) -> list[TTSScena
             notes="8-bit companded; RMS skipped",
         ),
         TTSScenario(
+            name="encoding_alaw_wav",
+            description="encoding=alaw sample_rate=8000 container=wav (telephony)",
+            params={"encoding": "alaw", "sample_rate": "8000", "container": "wav"},
+            expect_container="wav",
+            tolerated_error_substring="encoding",
+            notes="8-bit companded; RMS skipped",
+        ),
+        TTSScenario(
             name="encoding_aac",
             description="encoding=aac (raw AAC stream — bytes-only check)",
             params={"encoding": "aac"},

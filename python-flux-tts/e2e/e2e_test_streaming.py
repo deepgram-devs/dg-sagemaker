@@ -66,8 +66,11 @@ from e2e.e2e_test_common import (  # noqa: E402
     REFERENCE_PHRASES,
     REFERENCE_TEXT,
     SAMPLE_RATE,
+    STREAM_ENCODINGS,
+    STREAM_REJECTED_ENCODINGS,
     audio_verdict,
     check_session_totals,
+    encoded_verdict,
     print_summary_table,
     select_scenarios,
 )
@@ -406,6 +409,78 @@ async def sc_unknown_param(client, ep, voice):
     }
 
 
+def _encoding_scenario(name: str, params: dict, expect_container: str | None):
+    """One streaming output encoding (see STREAM_ENCODINGS): enough bytes and no
+    server error. Companded audio has no header, so bytes are the signal."""
+    async def sc(client, ep, voice):
+        t0 = time.monotonic()
+        s = await _one_turn(client, ep, voice, REFERENCE_TEXT, **params)
+        ok, note = encoded_verdict(bytes(s.audio_bytes), expect_container)
+        if s.errors:
+            ok, note = False, f"server error: {s.errors[0]}"
+        return {
+            "scenario": name,
+            "ok": ok,
+            "notes": note,
+            "bytes": len(s.audio_bytes),
+            "duration_s": 0.0,
+            "rms": 0.0,
+            "billable_chars": s.billable_chars,
+            "elapsed_s": time.monotonic() - t0,
+        }
+    return sc
+
+
+async def sc_encoding_linear16_16k(client, ep, voice):
+    """A non-default linear16 rate over the WebSocket: audible, right length."""
+    t0 = time.monotonic()
+    s = await _one_turn(client, ep, voice, REFERENCE_TEXT, sample_rate=16000)
+    ok, note, stats = audio_verdict(bytes(s.audio_bytes), 16000)
+    if s.errors:
+        ok, note = False, f"server error: {s.errors[0]}"
+    return {
+        "scenario": "encoding_linear16_16k",
+        "ok": ok,
+        "notes": note or f"dur={stats.get('duration_s', 0.0):.2f}s at 16 kHz",
+        "bytes": len(s.audio_bytes),
+        "duration_s": stats.get("duration_s", 0.0),
+        "rms": stats.get("rms", 0.0),
+        "billable_chars": s.billable_chars,
+        "elapsed_s": time.monotonic() - t0,
+    }
+
+
+async def sc_compressed_encoding_rejected(client, ep, voice):
+    """NEGATIVE control — the WebSocket serves linear16/mulaw/alaw only. Each of
+    mp3/opus/aac/flac must be refused (handshake failure or Error frame), not
+    answered with audio the client cannot frame."""
+    t0 = time.monotonic()
+    accepted = []
+    for enc in STREAM_REJECTED_ENCODINGS:
+        try:
+            s = await _one_turn(
+                client, ep, voice, "Short probe.", encoding=enc, sample_rate=None
+            )
+            if not s.errors and s.audio_bytes:
+                accepted.append(enc)
+        except Exception:  # noqa: BLE001 — a handshake 400 arrives as an exception
+            pass
+    return {
+        "scenario": "compressed_encoding_rejected",
+        "ok": not accepted,
+        "notes": (
+            f"{'/'.join(STREAM_REJECTED_ENCODINGS)} all rejected as expected"
+            if not accepted
+            else f"ACCEPTED on the WebSocket: {','.join(accepted)}"
+        ),
+        "bytes": 0,
+        "duration_s": 0.0,
+        "rms": 0.0,
+        "billable_chars": 0,
+        "elapsed_s": time.monotonic() - t0,
+    }
+
+
 async def sc_concurrent_5(client, ep, voice):
     t0 = time.monotonic()
     results = await asyncio.gather(
@@ -449,6 +524,9 @@ SCENARIOS = {
     "configure_speed": sc_configure_speed,
     "interrupt": sc_interrupt,
     "unknown_param": sc_unknown_param,
+    "encoding_linear16_16k": sc_encoding_linear16_16k,
+    **{name: _encoding_scenario(name, params, expect) for name, params, expect in STREAM_ENCODINGS},
+    "compressed_encoding_rejected": sc_compressed_encoding_rejected,
     "concurrent_5": sc_concurrent_5,
 }
 
