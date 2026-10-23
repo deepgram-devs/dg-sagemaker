@@ -571,7 +571,7 @@ uv run e2e/e2e_test_streaming.py your-endpoint --wer-threshold 0.03
 | `basic_25s` | One connection, 25 s file, defaults — baseline WER |
 | `basic_15min` | One connection, 15 min looped file — long-form smoke |
 | `concurrent_5x_25s` | 5 simultaneous connections, 25 s file |
-| `concurrent_10x_15min` | 10 simultaneous connections, 15 min file — sustained load |
+| `concurrent_10x_15min` | 10 simultaneous connections, 15 min file — sustained load (WER gate 6 %) |
 | `ramp_10x_step5` | 10 conns in batches of 5 with 2 s delay |
 | `feature_interim` | `--interim-results true` — verifies interims emitted |
 | `feature_diarize` | `--diarize true` — body unchanged, speaker tags added |

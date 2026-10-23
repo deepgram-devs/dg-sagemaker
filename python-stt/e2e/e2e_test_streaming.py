@@ -155,6 +155,17 @@ class StreamScenario:
     notes: str = ""
 
 
+# Sustained-load gate for concurrent_10x_15min. Nova-3 multilingual's default
+# model (version 2026-10-16.2) scores 5.62% on this file over streaming, the
+# same 5.62% the hosted API gives for the identical audio (the earlier
+# 10-language model scored 4.22%), so the 5% default would fail a correct
+# endpoint. Batch on the same file is 1.69%: the gap is streaming-only.
+LONG_FORM_WER_THRESHOLD = 0.06
+# Gates that --wer-threshold / the ja CER gate replace: the default, plus the
+# long-form gate above (a relaxed English WER, not a deliberate distortion).
+_REPLACEABLE_THRESHOLDS = (0.05, LONG_FORM_WER_THRESHOLD)
+
+
 def default_scenarios(model: str, language: str) -> list[StreamScenario]:
     """Feature coverage matrix per the docs (nova-3, streaming):
 
@@ -205,6 +216,7 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
             description="10 simultaneous connections on ~15 min file",
             use_long_form=True,
             connections=10,
+            wer_threshold=LONG_FORM_WER_THRESHOLD,
             notes="sustained-load WER check",
         ),
         StreamScenario(
@@ -924,11 +936,11 @@ def main() -> int:
         # comparable. An explicit --wer-threshold still wins.
         args.wer_threshold = JA_CER_THRESHOLD
         for sc in scenarios:
-            if sc.wer_threshold == 0.05:
+            if sc.wer_threshold in _REPLACEABLE_THRESHOLDS:
                 sc.wer_threshold = JA_CER_THRESHOLD
     if args.wer_threshold != 0.05:
         for s in scenarios:
-            if s.wer_threshold == 0.05:
+            if s.wer_threshold in _REPLACEABLE_THRESHOLDS:
                 s.wer_threshold = args.wer_threshold
 
     if args.list:
