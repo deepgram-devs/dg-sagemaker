@@ -215,6 +215,9 @@ class DeepgramSageMakerConnection:
         # Red-team / metering-correlation diagnostics
         self.dg_request_id: str | None = None
         self.metadata_msg: dict | None = None
+        # alternatives[0].languages_hinted from the first Results that carries
+        # it (nova-3 multilingual echoes the request's language_hint values).
+        self.languages_hinted: list[str] | None = None
         self.message_type_counts: Counter[str] = Counter()
         self.unknown_message_count = 0
         self.ring_buffer: deque[tuple[float, str]] = deque(maxlen=ring_size)
@@ -262,7 +265,12 @@ class DeepgramSageMakerConnection:
         # query-string characters (`:`, `&`, etc.) — e.g. `replace=src:dst`,
         # which SageMaker's bidi-stream `model_query_string` would otherwise
         # mangle to an empty `replace: {}` on the API side.
-        query_string = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in query_params.items())
+        # A list value repeats the key (e.g. language_hint=en&language_hint=es).
+        query_string = "&".join(
+            f"{k}={quote(str(item), safe='')}"
+            for k, v in query_params.items()
+            for item in (v if isinstance(v, list) else [v])
+        )
 
         if keywords_list:
             keywords_params = "&".join(f"keywords={quote(kw)}" for kw in keywords_list)
@@ -567,6 +575,9 @@ class DeepgramSageMakerConnection:
             return
 
         alternatives = parsed.get('channel', {}).get('alternatives', [])
+        if (self.languages_hinted is None and alternatives
+                and 'languages_hinted' in alternatives[0]):
+            self.languages_hinted = list(alternatives[0]['languages_hinted'] or [])
         if not alternatives or not alternatives[0].get('transcript'):
             return
 
@@ -607,6 +618,8 @@ class DeepgramSageMakerConnection:
             "combined_final_text": " ".join(self.final_transcript_parts).strip(),
             "message_type_counts": dict(self.message_type_counts),
             "unknown_message_count": self.unknown_message_count,
+            "model_info": (self.metadata_msg or {}).get("model_info"),
+            "languages_hinted": self.languages_hinted,
             "configure_sent": self.configure_sent,
             "configure_acks": list(self.configure_acks),
             "configure_failures": list(self.configure_failures),
@@ -1616,7 +1629,9 @@ async def run_stream(args) -> int:
 
     redact_list = _parse_redact(args.redact)
 
-    extra_params: dict[str, str] = {}
+    # A repeated key collects into a list so it is sent repeated, not
+    # last-wins (e.g. language_hint=en&language_hint=es).
+    extra_params: dict[str, str | list[str]] = {}
     for pair in args.extra.split("&"):
         pair = pair.strip()
         if not pair:
@@ -1625,7 +1640,12 @@ async def run_stream(args) -> int:
             print(f"ERROR: --extra entry '{pair}' must be in k=v form")
             return 1
         k, v = pair.split("=", 1)
-        extra_params[k.strip()] = v.strip()
+        k, v = k.strip(), v.strip()
+        if k in extra_params:
+            prev = extra_params[k]
+            extra_params[k] = (prev if isinstance(prev, list) else [prev]) + [v]
+        else:
+            extra_params[k] = v
 
     configure_body = None
     if args.configure:

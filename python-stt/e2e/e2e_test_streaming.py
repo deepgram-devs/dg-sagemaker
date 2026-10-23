@@ -130,12 +130,11 @@ class StreamScenario:
     expect_error_substring: str | None = None
     # None = no restriction (default). Set ONLY when the endpoint hard-rejects
     # (a real error, not a graceful warning/no-op) outside this language set —
-    # see `language_supported()` in e2e_test_common. No streaming scenario
-    # needs this today (summarize/topics/intents/sentiment are pre-recorded
-    # only; dictation/measurements/redact degrade gracefully rather than
-    # hard-reject per a 2026-07-14 docs+empirical audit) — field exists for
-    # parity with the batch driver so a future language-gated feature has
-    # somewhere to go.
+    # see `language_supported()` in e2e_test_common. summarize/topics/intents/
+    # sentiment are pre-recorded only, and dictation/measurements/redact
+    # degrade gracefully rather than hard-reject (2026-07-14 docs+empirical
+    # audit). The `language_hint` scenarios use it: the hint and its
+    # `languages_hinted` echo exist only on `language=multi`.
     supported_languages: list[str] | None = None
     # Mid-stream Configure assertions (scenario passes `--configure` in
     # extra_args). `expect_configure_acks` is the exact ConfigureSuccess count;
@@ -148,6 +147,11 @@ class StreamScenario:
     expect_configure_acks: int | None = None
     expect_applied_keyterms: list[str] | None = None
     expect_configure_failure_code: str | None = None
+    # `language_hint` assertion: every connection's first Results must echo
+    # exactly these values in `alternatives[0].languages_hinted`. An accepted
+    # but ignored hint would still transcribe, so the echo is what proves the
+    # parameter reached the multilingual model.
+    expect_languages_hinted: list[str] | None = None
     notes: str = ""
 
 
@@ -399,6 +403,25 @@ def default_scenarios(model: str, language: str) -> list[StreamScenario]:
             presence_check="spacewalk",  # search hits surface in results
             bundle_component="g2p (uuid 89555db3-...)",
             notes="needs g2p; will FAIL on bundles without it",
+        ),
+        # ---- Multilingual language hints ----
+        StreamScenario(
+            name="feature_language_hint",
+            description="language_hint=en (multilingual: bias detection toward English)",
+            connections=1,
+            extra_args=["--extra", "language_hint=en"],
+            expect_languages_hinted=["en"],
+            supported_languages=["multi"],
+            notes="multilingual only; the hint must be echoed in languages_hinted",
+        ),
+        StreamScenario(
+            name="feature_language_hint_multiple",
+            description="language_hint=en&language_hint=es (two hints, both echoed)",
+            connections=1,
+            extra_args=["--extra", "language_hint=en&language_hint=es"],
+            expect_languages_hinted=["en", "es"],
+            supported_languages=["multi"],
+            notes="multilingual only; repeated param must reach the API as two values",
         ),
         # ---- Redaction / entity detection (bundle-dependent) ----
         StreamScenario(
@@ -750,6 +773,14 @@ def run_scenario(
             configure_ok = False
             notes_parts.append(f"UNEXPECTED_FAILURE {failures!r}")
 
+    hinted_ok = True
+    if scenario.expect_languages_hinted is not None and not tolerated:
+        got = [r.get("languages_hinted") for r in rows]
+        hinted_ok = bool(got) and all(g == scenario.expect_languages_hinted for g in got)
+        notes_parts.append(
+            f"languages_hinted={'ok' if hinted_ok else 'MISMATCH ' + repr(got)}"
+        )
+
     if tolerated:
         notes_parts.append(
             f"BUNDLE-GAP: '{scenario.tolerated_error_substring}' "
@@ -767,6 +798,7 @@ def run_scenario(
             and presence_ok
             and tail_ok
             and configure_ok
+            and hinted_ok
         )
     if scenario.name == "feature_interim_results" and interim_total == 0 and not tolerated:
         ok = False

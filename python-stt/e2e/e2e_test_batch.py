@@ -146,6 +146,11 @@ class BatchScenario:
     # see `language_supported()` in e2e_test_common for the exact semantics
     # and why most "English only" docs badges do NOT belong here.
     supported_languages: list[str] | None = None
+    # `language_hint` assertion (sync only): the response's
+    # `alternatives[0].languages_hinted` must equal exactly these values. An
+    # accepted but ignored hint would still transcribe, so the echo is what
+    # proves the parameter reached the multilingual model.
+    expect_languages_hinted: list[str] | None = None
     notes: str = ""
 
 
@@ -361,6 +366,25 @@ def _all_scenarios() -> list[BatchScenario]:
             presence_check="spacewalk",
             bundle_component="g2p (uuid 89555db3-...)",
             notes="search needs g2p (grapheme-to-phoneme) — NOT yet in FEATURE_COMPONENTS",
+        ),
+        # ---- Multilingual language hints ----
+        BatchScenario(
+            name="sync_25s_language_hint",
+            description="sync + language_hint=en (multilingual: bias detection toward English)",
+            transport="sync",
+            custom_params={"language_hint": "en"},
+            expect_languages_hinted=["en"],
+            supported_languages=["multi"],
+            notes="multilingual only; the hint must be echoed in languages_hinted",
+        ),
+        BatchScenario(
+            name="sync_25s_language_hint_multiple",
+            description="sync + language_hint=en&language_hint=es (two hints, both echoed)",
+            transport="sync",
+            custom_params={"language_hint": "en", "language_hint2": "es"},
+            expect_languages_hinted=["en", "es"],
+            supported_languages=["multi"],
+            notes="multilingual only; repeated param must reach the API as two values",
         ),
         # ---- Bundle-component-dependent (will FAIL until bundle adds these) ----
         BatchScenario(
@@ -793,10 +817,21 @@ def run_sync_scenario(
         presence_ok = scenario.presence_check.lower() in haystack
         notes.append(f"presence({scenario.presence_check})={'ok' if presence_ok else 'MISSING'}")
 
+    hinted_ok = True
+    if scenario.expect_languages_hinted is not None:
+        got = [
+            (((r or {}).get("results") or {}).get("channels") or [{}])[0]
+            .get("alternatives", [{}])[0].get("languages_hinted")
+            for _, r, _ in successes
+        ]
+        hinted_ok = bool(got) and all(g == scenario.expect_languages_hinted for g in got)
+        notes.append(f"languages_hinted={'ok' if hinted_ok else 'MISMATCH ' + repr(got)}")
+
     ok = (
         not failures
         and w_ratio <= scenario.wer_threshold
         and presence_ok
+        and hinted_ok
     )
 
     return {

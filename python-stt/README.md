@@ -8,8 +8,8 @@ Python scripts for stress testing Deepgram Speech-to-Text (STT) endpoints deploy
 
 Two **end-to-end correctness drivers** sit on top of these scripts (in `e2e/`) as definitive promotion gates:
 
-- **`e2e/e2e_test_streaming.py`** — downloads `https://dpgr.am/spacewalk.wav`, multiplies it to ~15 min, drives `stt_wav_stress.py stream` through 24 scenarios (basic / sustained-concurrency / ramped / feature flags / mid-stream `Configure` / adversarial close path), and validates every connection's `combined_final_text` against a known reference transcript via Word Error Rate.
-- **`e2e/e2e_test_batch.py`** — same fixtures, takes `--mode sync` or `--mode async` to match how the target endpoint is configured (a single batch endpoint serves only one transport). Sync mode runs five scenarios on the 25-second sample (≤ 25 MB body limit); async mode runs five scenarios on the long-form 15-min variant via S3 in/out (~76 MB, well over the sync cap), including summarize via fathom.
+- **`e2e/e2e_test_streaming.py`** — downloads `https://dpgr.am/spacewalk.wav`, multiplies it to ~15 min, drives `stt_wav_stress.py stream` through 26 scenarios (basic / sustained-concurrency / ramped / feature flags / multilingual `language_hint` / mid-stream `Configure` / adversarial close path), and validates every connection's `combined_final_text` against a known reference transcript via Word Error Rate.
+- **`e2e/e2e_test_batch.py`** — same fixtures, takes `--mode sync` or `--mode async` to match how the target endpoint is configured (a single batch endpoint serves only one transport). Sync mode runs 26 scenarios on the 25-second sample (≤ 25 MB body limit); async mode runs six scenarios on the long-form 15-min variant via S3 in/out (~76 MB, well over the sync cap), including summarize via fathom.
 
 ## Prerequisites
 
@@ -577,6 +577,8 @@ uv run e2e/e2e_test_streaming.py your-endpoint --wer-threshold 0.03
 | `feature_diarize` | `--diarize true` — body unchanged, speaker tags added |
 | `feature_keyterms` | `--keyterms 'spacewalk,female'` — presence check on `spacewalk` |
 | `feature_redact_name` | `--redact name` — presence of redaction marker, WER skipped |
+| `feature_language_hint` | `language_hint=en` — `languages_hinted` must echo `["en"]` (only with `--language multi`) |
+| `feature_language_hint_multiple` | `language_hint=en&language_hint=es` — both hints sent and echoed (only with `--language multi`) |
 | `configure_keyterms` | `Configure` keyterms at 5 s — `ConfigureSuccess` must echo the new list; stream keeps transcribing |
 | `configure_keyterms_clear` | `keyterm=Deepgram` at connect, then `Configure` `keyterms: []` — echo must be the empty list |
 | `configure_numerals` | `Configure` `features.numerals=true` before any audio — `first` must come back as `1st` |
@@ -614,6 +616,8 @@ uv run e2e/e2e_test_batch.py --mode async --list
 | `sync_25s_diarize` | sync | `diarize=true` — body unchanged |
 | `sync_25s_keyterms` | sync | keyterms biasing, presence check |
 | `sync_25s_redact_name` | sync | `redact=name`, WER skipped |
+| `sync_25s_language_hint` | sync | `language_hint=en` — `languages_hinted` must echo `["en"]` (only with `--language multi`) |
+| `sync_25s_language_hint_multiple` | sync | two `language_hint` values, both echoed (only with `--language multi`) |
 | `sync_25s_reject_unknown_param` | sync | negative: `bogus=true` must 400 (`unsupported_parameter`), not serve — reject-unknown-params gate |
 | `sync_25s_reject_unknown_param_falsy` | sync | negative: `bogus=false` must also 400 (reject is value-independent) |
 | `async_25s` | async | Short-form smoke (25 s file via S3) |
