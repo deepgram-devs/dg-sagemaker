@@ -191,7 +191,13 @@ def main() -> int:
             # a determinate "no": the listing was read and no version carries the language
             say(f"no version includes language {language!r}. Available: "
                 + "; ".join(v["version"] for v in versions))
-            return finish(args, {**result, "error": "language_not_offered", "language": language},
+            docs = catalog.get("docs", {})
+            say(f"A multilingual listing may cover it: see {docs.get('stt_languages')} (speech-to-text) or "
+                f"{docs.get('tts_languages')} (text-to-speech). To request another language on SageMaker, "
+                f"contact a Deepgram representative: {docs.get('contact')}")
+            return finish(args, {**result, "error": "language_not_offered", "language": language,
+                                 "language_docs": {k: docs.get(k) for k in
+                                                   ("stt_languages", "tts_languages", "contact")}},
                           EXIT_NEGATIVE)
     if args.version:
         want = args.version.lower()

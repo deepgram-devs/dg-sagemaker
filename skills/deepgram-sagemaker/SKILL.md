@@ -56,6 +56,14 @@ supported for Marketplace-hosted Deepgram** — if the person needs them, tell
 them to reach out to a Deepgram representative and do not deploy one; the
 scripts refuse `--async-bucket`. One endpoint serves one product.
 
+Languages: multilingual models and TTS on SageMaker cover the generally
+available languages in Deepgram's language pages (`docs.stt_languages`,
+`docs.tts_languages` in `products.json`; each product's `language_coverage`
+says which applies). Monolingual Nova-3 is a subset listed in the version
+titles. Send the person to a Deepgram representative (`docs.contact`) to
+request another monolingual language on SageMaker, or when a model's coverage
+does not match those pages.
+
 ### Phase 2 — Subscribe
 `uv run scripts/list_products.py --product <slug> --region <region>`
 If exit 1 (not subscribed): `uv run scripts/subscribe.py <slug>` shows the offer

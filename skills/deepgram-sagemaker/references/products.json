@@ -1,5 +1,5 @@
 {
-  "catalog_version": "2026-10-28.1",
+  "catalog_version": "2026-10-30.1",
   "seller_profile_id": "6efa21f9-9a33-4cae-ba44-756436fa71dd",
   "marketplace_search_url": "https://aws.amazon.com/marketplace/search/results?searchTerms=deepgram&CREATOR=6efa21f9-9a33-4cae-ba44-756436fa71dd&FULFILLMENT_OPTION_TYPE=SAGEMAKER_MODEL&filters=CREATOR%2CFULFILLMENT_OPTION_TYPE",
   "manage_subscriptions_url": "https://us-east-1.console.aws.amazon.com/marketplace/subscriptions",
@@ -10,7 +10,10 @@
     "deploy": "https://developers.deepgram.com/docs/deploy-amazon-sagemaker",
     "invoke": "https://developers.deepgram.com/docs/invoke-sagemaker-endpoint",
     "troubleshooting": "https://developers.deepgram.com/docs/troubleshooting-sagemaker",
-    "field_demonstration_program": "https://docs.aws.amazon.com/marketplace/latest/userguide/field-demonstration-program.html"
+    "field_demonstration_program": "https://docs.aws.amazon.com/marketplace/latest/userguide/field-demonstration-program.html",
+    "stt_languages": "https://developers.deepgram.com/docs/models-languages-overview",
+    "tts_languages": "https://developers.deepgram.com/docs/tts-models-languages-overview",
+    "contact": "https://deepgram.com/contact-us"
   },
   "inference_ami_version": "al2023-ami-sagemaker-inference-gpu-4-1",
   "instance_profiles": {
@@ -125,6 +128,7 @@
       "service": "stt",
       "family": "nova-3",
       "languages": "monolingual",
+      "language_coverage": "A subset of Nova-3's generally available monolingual languages; each version title lists the ones it carries. For a language not offered here, contact Deepgram (docs.contact).",
       "transport": "streaming",
       "invocation_modes": [
         "streaming"
@@ -150,6 +154,7 @@
       "service": "stt",
       "family": "nova-3",
       "languages": "monolingual",
+      "language_coverage": "A subset of Nova-3's generally available monolingual languages; each version title lists the ones it carries. For a language not offered here, contact Deepgram (docs.contact).",
       "transport": "batch",
       "invocation_modes": [
         "sync"
@@ -174,6 +179,7 @@
       "service": "stt",
       "family": "nova-3",
       "languages": "multilingual",
+      "language_coverage": "Every generally available Nova-3 multilingual language listed at docs.stt_languages.",
       "transport": "streaming",
       "invocation_modes": [
         "streaming"
@@ -199,6 +205,7 @@
       "service": "stt",
       "family": "nova-3",
       "languages": "multilingual",
+      "language_coverage": "Every generally available Nova-3 multilingual language listed at docs.stt_languages.",
       "transport": "batch",
       "invocation_modes": [
         "sync"
@@ -229,6 +236,7 @@
       "service": "stt",
       "family": "flux",
       "languages": "monolingual",
+      "language_coverage": "English.",
       "transport": "streaming",
       "invocation_modes": [
         "streaming"
@@ -258,6 +266,7 @@
       "service": "stt",
       "family": "flux",
       "languages": "multilingual",
+      "language_coverage": "Every generally available Flux multilingual language listed at docs.stt_languages.",
       "transport": "streaming",
       "invocation_modes": [
         "streaming"
@@ -285,6 +294,7 @@
       "service": "tts",
       "family": "aura-2",
       "languages": "per-version (e.g. en, es)",
+      "language_coverage": "The generally available Aura-2 languages and voices listed at docs.tts_languages, split across versions; each version title lists its languages.",
       "transport": "both",
       "invocation_modes": [
         "streaming",
@@ -314,6 +324,7 @@
       "service": "tts",
       "family": "flux-tts",
       "languages": "per-version",
+      "language_coverage": "The generally available Flux TTS English voices listed at docs.tts_languages.",
       "transport": "both",
       "invocation_modes": [
         "streaming",
@@ -345,6 +356,7 @@
       "service": "tts",
       "family": "flux-tts",
       "languages": "per-version",
+      "language_coverage": "The generally available non-English Flux TTS languages and voices listed at docs.tts_languages; the version title lists them.",
       "version_language": "es",
       "transport": "both",
       "invocation_modes": [

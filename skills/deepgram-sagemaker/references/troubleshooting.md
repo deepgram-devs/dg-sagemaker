@@ -38,6 +38,8 @@ aws sagemaker describe-endpoint --endpoint-name <name> --region <r> --query '{St
 |---|---|---|
 | 400 `No such model/language/tier` from `InvokeEndpoint` on a **Streaming** listing | Streaming listings only serve bidirectional streams | Use `InvokeEndpointWithBidirectionalStream`, or deploy the Batch listing. |
 | 400 / stream closes ~1 s with no transcript on **multilingual** Nova-3 | request has `language=en` (or any specific code) | `language=multi`. |
+| A language the customer needs is not in any version title | monolingual Nova-3 on SageMaker carries a subset of the generally available languages | check whether the multilingual listing covers it ([overview](https://developers.deepgram.com/docs/models-languages-overview)); otherwise request it through a Deepgram representative (https://deepgram.com/contact-us). |
+| A multilingual model or TTS voice does not handle a language the [STT](https://developers.deepgram.com/docs/models-languages-overview) / [TTS](https://developers.deepgram.com/docs/tts-models-languages-overview) overview lists as generally available | not expected: those listings should match the overview | collect the request and a sample, and contact a Deepgram representative (https://deepgram.com/contact-us). |
 | 400 on Flux with `language=` | Flux has no language param | `model=flux-general-en` or `model=flux-general-multi`. |
 | 400 on Flux from a `/v1/listen` client | wrong path | `v2/listen` with the turn-based protocol. |
 | 400 `unsupported_parameter` | unknown query param (typo, or a param this product does not carry) | remove it. |

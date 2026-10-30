@@ -12,6 +12,17 @@ three or four of these.
 | Synthesize speech (IVR prompts, agent replies, narration) | **Aura-2** | `aura-2` |
 | Turn-based synthesis for voice agents on `/v2/speak` (interruptible turns) | **Flux TTS** | `flux-tts` (English), `flux-tts-multi` (other languages; same listing, separate version) |
 
+**Which languages?** SageMaker carries the generally available languages of the
+families above. Only these families are offered (no Nova-2, Base or other
+older models).
+
+- Speech-to-text: the [models and languages overview](https://developers.deepgram.com/docs/models-languages-overview).
+- Text-to-speech: the [TTS models and languages overview](https://developers.deepgram.com/docs/tts-models-languages-overview).
+
+Multilingual models (Nova-3 multilingual, Flux multilingual) and TTS cover what
+those pages list. Monolingual Nova-3 on SageMaker is a **subset**: the version
+titles list what is offered.
+
 ## 2. Live audio or pre-recorded files? (STT only)
 
 - **Live** (microphone, phone call, meeting in progress) → a **Streaming**
@@ -38,6 +49,12 @@ three or four of these.
   versions), add `--version` with a tier or date to choose between them.
 - Speakers switch languages, or the language is unknown → **Multilingual**
   listing. Request sends `language=multi` (Nova-3) or `model=flux-general-multi` (Flux).
+  It covers the generally available multilingual languages in the
+  [models and languages overview](https://developers.deepgram.com/docs/models-languages-overview).
+- A language that needs a monolingual model is not among the versions offered →
+  the customer can request it on SageMaker through a Deepgram representative
+  (https://deepgram.com/contact-us). Meanwhile, the multilingual listing may already cover it; check
+  the overview.
 
 ## 4. Which region?
 
