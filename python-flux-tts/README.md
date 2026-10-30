@@ -6,7 +6,7 @@ SageMaker endpoint. Flux TTS differs from Aura-2 in ways that matter for testing
 | | Aura-2 | Flux TTS |
 |---|---|---|
 | path | `/v1/speak` | `/v2/speak` |
-| model string | `aura-2-<voice>-en` | `flux-<voice>-en` |
+| model string | `aura-2-<voice>-en` | `flux-<voice>-<lang>` (e.g. `flux-alexis-en`, `flux-aina-es`) |
 | turn model | continuous | **turn-based** (`Speak` … `Flush`) |
 | unknown query params | ignored | **rejected** with a 400 |
 | billing tier | `aura-2` | `flux-tts`, 45 units per 1k characters |
@@ -23,6 +23,13 @@ Both transports are served off the **one** `streaming` image:
 Flux TTS is single-GPU, but **g6 is the floor** — use `ml.g6.2xlarge` or
 `ml.g6e.2xlarge`. It does not run on `ml.g5.*` or `ml.g4dn.*`. (This is narrower
 than Flux ASR, which does run on g5.)
+
+The listing ships English and the other languages as **separate versions**
+(the version title lists the languages). The non-English version needs a
+`*.4xlarge` host — `ml.g7.4xlarge` (recommended), `ml.g7e.4xlarge` or
+`ml.g6e.4xlarge` — and only serves its own voices: pass `--voice` with one of
+them (e.g. `--voice flux-aina-es`) when testing it, since the drivers default to
+an English voice.
 
 ## Setup
 

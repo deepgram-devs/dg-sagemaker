@@ -288,6 +288,18 @@ diagnoses, teardown with post-delete verification. Not exercised:
 `configure_autoscaling.py`, `update_endpoint.py`, `--fips`, non-English
 versions, TTS products through `invoke_test.py`.
 
+2026-10-28, `flux-tts-multi` (the non-English Flux TTS version, same listing as
+`flux-tts`): `resolve_model_package_arn.py` slug defaults and `--language`
+against the live listings, `list_products.py`, `check_quota.py`, and
+`deploy_endpoint.py` planning with the default pool (no endpoint created). The
+endpoint itself was buyer-tested with the `python-flux-tts` e2e drivers, not
+through the kit's deploy/invoke scripts.
+
+One listing can carry versions that need different hardware or voices. Model
+that as several `products.json` entries sharing a `product_id`, each with a
+`version_language` the resolver uses as its default `--language`; the scripts
+dedupe per-listing calls by `product_id`.
+
 When you add, rename or remove a script, update the "Agent-assisted setup"
 section of the top-level README and the phase list in `SKILL.md` in the same
 change.

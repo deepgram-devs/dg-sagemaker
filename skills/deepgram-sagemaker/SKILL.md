@@ -73,8 +73,12 @@ accounts never see the offer and nothing changes for them. `--no-fdp` takes the
 public offer instead. Details and the agent rules: `references/field-demonstration-program.md`.
 
 ### Phase 3 — Parameters
-1. `uv run scripts/resolve_model_package_arn.py <slug> --region <region> [--version "<substring>"] --json`
-   — versions differ by language set; pick with the person. Output has the ARN
+1. `uv run scripts/resolve_model_package_arn.py <slug> --region <region> [--language <code>] [--version "<substring>"] --json`
+   — versions differ by language set; pick with the person. `--language` matches
+   the code exactly against each title's language list (prefer it over
+   `--version`: the substring `en` also matches "General"). `flux-tts` and
+   `flux-tts-multi` are one listing; their slugs select the English and the
+   non-English version respectively, which need different instance types. Output has the ARN
    for this region, the recommended instance type and the package's supported
    types. If the ARN lookup fails it prints the console path; then pass the ARN
    by hand to the next step.

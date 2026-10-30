@@ -214,7 +214,14 @@ def main() -> int:
             return finish(args, {"error": "unsupported_instance_type", "unsupported": bad,
                                  "supported": supported}, EXIT_NEGATIVE)
         if not types:
-            fail_error("no instance type left after filtering against the package's supported list")
+            # One listing can ship versions with different hardware (flux-tts English vs flux-tts-multi):
+            # point at the catalog entry whose pool fits this version.
+            fits = [q["slug"] for q in catalog["products"]
+                    if prod and q["product_id"] == prod["product_id"] and q["slug"] != prod["slug"]
+                    and set(catalog["instance_profiles"][q["instance_profile"]]["default_pool"]) & set(supported)]
+            hint = f" This version matches --product {fits[0]}." if fits else ""
+            fail_error("no instance type left after filtering against the package's supported list "
+                       f"({', '.join(supported)}).{hint}")
 
     # quota: pools fall back on CAPACITY, never on QUOTA. One zero-quota rung fails the whole
     # CreateEndpoint, so drop such rungs up front. Fails open if the lookup fails.

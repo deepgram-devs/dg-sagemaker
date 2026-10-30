@@ -26,15 +26,24 @@ This script does the same lookup programmatically:
 
   uv run resolve_model_package_arn.py nova-3-mono-streaming --region us-east-2
   uv run resolve_model_package_arn.py nova-3-mono-streaming --region us-east-2 --version "de/en/es"
+  uv run resolve_model_package_arn.py nova-3-mono-streaming --region us-east-2 --language fr
   uv run resolve_model_package_arn.py prod-tnv5pm6nlcm44 --region us-east-2 --list-versions --json
 
-With several versions and no --version the versions are listed and nothing is
-selected (exit 0, "selected": null) — pick one by a substring of its title.
+Choosing a version:
+  --language xx   the version whose language list (the parenthesised part of the
+                  title, e.g. "(de/en/es)") contains exactly the code xx.
+  --version text  the version whose title contains text (case-insensitive).
+Both may be combined. A product entry with "version_language" (one listing that
+ships several language sets as separate versions, e.g. flux-tts and
+flux-tts-multi) applies that language when neither flag is given and the product
+is named by its slug. With several matching versions the versions are listed and
+nothing is selected (exit 0, "selected": null).
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import ssl
 import sys
 import urllib.error
@@ -44,7 +53,7 @@ from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from botocore.exceptions import BotoCoreError, ClientError
 
-from _common import (EXIT_OK, MARKETPLACE_REGION, add_common_args, aws_error_text, client,
+from _common import (EXIT_NEGATIVE, EXIT_OK, MARKETPLACE_REGION, add_common_args, aws_error_text, client,
                      fail_error, find_product, finish, load_catalog, make_session,
                      product_choices, resolve_region, say)
 
@@ -54,6 +63,15 @@ CONSOLE_STEPS = (
     "interface (CLI)' → pick the Version → copy the Model ARN for your region. Then pass it to "
     "deploy_endpoint.py --model-package-arn <arn>."
 )
+
+
+TITLE_LANGUAGES = re.compile(r"\(([A-Za-z0-9/-]+)\)\s*$")
+
+
+def title_languages(title: str | None) -> list[str]:
+    """Language codes from a version title: '2026-10-20 - General (de/es/fr)' -> ['de', 'es', 'fr']."""
+    m = TITLE_LANGUAGES.search(title or "")
+    return [c.lower() for c in m.group(1).split("/")] if m else []
 
 
 def list_versions(disc, product_id: str) -> list[dict]:
@@ -66,6 +84,7 @@ def list_versions(disc, product_id: str) -> list[dict]:
         out.append({
             "fulfillment_option_id": o.get("fulfillmentOptionId"),
             "version": o.get("fulfillmentOptionVersion"),
+            "languages": title_languages(o.get("fulfillmentOptionVersion")),
             "release_notes": o.get("releaseNotes"),
             "recommended_realtime_instance_type": (o.get("recommendation") or {}).get(
                 "recommendedRealtimeInferenceInstanceType"),
@@ -109,6 +128,8 @@ def main() -> int:
     add_common_args(p)
     p.add_argument("--version", default=None,
                    help="case-insensitive substring of the version title, e.g. 'de/en/es' or '2026-09-10'")
+    p.add_argument("--language", default=None,
+                   help="select the version whose language list contains this exact code, e.g. 'fr' or 'multi'")
     p.add_argument("--list-versions", action="store_true", help="list versions and stop")
     args = p.parse_args()
 
@@ -158,23 +179,51 @@ def main() -> int:
         return finish(args, result, EXIT_OK)
 
     # select a version ----------------------------------------------------------
+    language = args.language
+    if language is None and args.version is None and args.product != pid and prod.get("version_language"):
+        language = prod["version_language"]
+        say(f"{prod['slug']}: selecting the version that includes language '{language}' "
+            "(pass --language or --version to choose another)")
+    sel = versions
+    if language:
+        sel = [v for v in sel if language.strip().lower() in v["languages"]]
+        if not sel:
+            # a determinate "no": the listing was read and no version carries the language
+            say(f"no version includes language {language!r}. Available: "
+                + "; ".join(v["version"] for v in versions))
+            return finish(args, {**result, "error": "language_not_offered", "language": language},
+                          EXIT_NEGATIVE)
     if args.version:
         want = args.version.lower()
-        sel = [v for v in versions if want in (v["version"] or "").lower()]
+        sel = [v for v in sel if want in (v["version"] or "").lower()]
         if not sel:
-            fail_error(f"no version title contains {args.version!r}. Available: "
+            fail_error(f"no version title contains {args.version!r}"
+                       + (f" with language {language!r}" if language else "") + ". Available: "
                        + "; ".join(v["version"] for v in versions))
-        if len(sel) > 1:
-            fail_error(f"--version {args.version!r} is ambiguous: " + "; ".join(v["version"] for v in sel))
+    if len(sel) == 1:
         chosen = sel[0]
-    elif len(versions) == 1:
-        chosen = versions[0]
+    elif language or args.version:
+        hint = ("Several versions carry that language; add --version <substring that tells them apart, "
+                "e.g. a tier such as 'Medical' or the date>." if language else
+                "Narrow it with --language <code> (exact match on the title's language list; a --version "
+                "substring such as 'en' also matches 'General') or a longer --version.")
+        fail_error("the selection is ambiguous: " + "; ".join(v["version"] for v in sel) + ". " + hint)
     else:
         say("")
-        say("Several versions exist. Choose one with --version <substring of the title> "
+        say("Several versions exist. Choose one with --language <code> or --version <substring of the title> "
             "(read the language list in each title / release notes).")
         return finish(args, result, EXIT_OK)
 
+    # one listing can map to several kit entries (one per version); report the entry whose
+    # version_language this version carries, so its pool/note match what will be deployed
+    for q in catalog["products"]:
+        if (q["product_id"] == pid and q.get("version_language") in chosen["languages"]
+                and q["slug"] != prod["slug"]):
+            say(f"note: this version matches the kit entry '{q['slug']}' (use --product {q['slug']} "
+                "with deploy_endpoint.py / check_quota.py)")
+            prod = q
+            result["product"] = q["slug"]
+            break
     arn = chosen["model_package_arns_by_region"].get(region)
     selected = {**chosen, "model_package_arn": arn}
     result["selected"] = selected

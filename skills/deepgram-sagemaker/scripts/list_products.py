@@ -127,6 +127,8 @@ def main() -> int:
     offers_error = None
     if not args.skip_offers:
         for prod in catalog["products"]:
+            if prod["product_id"] in offers:  # several catalog entries can share one listing
+                continue
             try:
                 offers[prod["product_id"]] = list_purchase_options(disc, prod["product_id"])
             except (ClientError, BotoCoreError) as e:

@@ -1,5 +1,5 @@
 {
-  "catalog_version": "2026-09-16.3",
+  "catalog_version": "2026-10-28.1",
   "seller_profile_id": "6efa21f9-9a33-4cae-ba44-756436fa71dd",
   "marketplace_search_url": "https://aws.amazon.com/marketplace/search/results?searchTerms=deepgram&CREATOR=6efa21f9-9a33-4cae-ba44-756436fa71dd&FULFILLMENT_OPTION_TYPE=SAGEMAKER_MODEL&filters=CREATOR%2CFULFILLMENT_OPTION_TYPE",
   "manage_subscriptions_url": "https://us-east-1.console.aws.amazon.com/marketplace/subscriptions",
@@ -96,6 +96,25 @@
         "ml.g4dn.*"
       ],
       "note": "Single GPU, ml.g6 is the floor. Neither g5 nor g4dn is supported."
+    },
+    "flux-tts-multi": {
+      "recommended": "ml.g7.4xlarge",
+      "default_pool": [
+        "ml.g7.4xlarge",
+        "ml.g7e.4xlarge",
+        "ml.g6e.4xlarge"
+      ],
+      "supported": [
+        "ml.g7.4xlarge",
+        "ml.g7e.4xlarge",
+        "ml.g6e.4xlarge"
+      ],
+      "unsupported": [
+        "ml.g6.*",
+        "ml.g5.*",
+        "ml.g4dn.*"
+      ],
+      "note": "Single GPU on a *.4xlarge host: g7 (recommended), g7e or g6e. g6, g5 and g4dn are not supported."
     }
   },
   "products": [
@@ -288,7 +307,6 @@
     {
       "slug": "flux-tts",
       "aliases": [
-        "aura-3",
         "flux-text-to-speech"
       ],
       "product_id": "prod-dfqlk3u4c7vg4",
@@ -308,10 +326,43 @@
       "language_param": "voice is chosen by model=flux-<voice>-<lang>",
       "default_voice": "flux-alexis-en",
       "instance_profile": "flux-tts-single-gpu",
-      "use_when": "Turn-based text-to-speech for voice agents on /v2/speak (Speak … Flush per turn, Interrupt supported). Same endpoint serves streaming and synchronous HTTP.",
+      "use_when": "Turn-based English text-to-speech for voice agents on /v2/speak (Speak … Flush per turn, Interrupt supported). Same endpoint serves streaming and synchronous HTTP. For other languages use flux-tts-multi (same listing, different version).",
       "gotchas": [
         "API path is v2/speak, not v1/speak.",
         "Single GPU; ml.g6 is the floor — g5 and g4dn are not supported.",
+        "/v2/speak rejects unknown query parameters with 400 rather than ignoring them.",
+        "`speed` is not a flux-tts parameter."
+      ],
+      "version_language": "en"
+    },
+    {
+      "slug": "flux-tts-multi",
+      "aliases": [
+        "flux-tts-multilingual"
+      ],
+      "product_id": "prod-dfqlk3u4c7vg4",
+      "listing_name": "Deepgram Voice AI Flux Text-to-Speech (TTS)",
+      "service": "tts",
+      "family": "flux-tts",
+      "languages": "per-version",
+      "version_language": "es",
+      "transport": "both",
+      "invocation_modes": [
+        "streaming",
+        "sync"
+      ],
+      "api_path": "v2/speak",
+      "base_params": {
+        "model": "flux-aina-es"
+      },
+      "language_param": "voice is chosen by model=flux-<voice>-<lang>",
+      "default_voice": "flux-aina-es",
+      "instance_profile": "flux-tts-multi",
+      "use_when": "Flux TTS in languages other than English (the version title lists them, e.g. de/es/fr/hi/it/ja/nl/pt/ru). Same listing and API as flux-tts, but a separate version with its own voices and larger instance types; one endpoint serves one version.",
+      "gotchas": [
+        "Same Marketplace listing as flux-tts: one subscription covers both, but each endpoint runs ONE version. English voices are only in the English version; a voice outside the deployed version is rejected with 400.",
+        "Needs a *.4xlarge instance (ml.g7.4xlarge recommended); the *.2xlarge types the English version uses are not supported.",
+        "API path is v2/speak, not v1/speak.",
         "/v2/speak rejects unknown query parameters with 400 rather than ignoring them.",
         "`speed` is not a flux-tts parameter."
       ]

@@ -10,7 +10,7 @@ three or four of these.
 | Transcribe speech (calls, meetings, media, dictation) | **Nova-3** | `nova-3-mono-streaming`, `nova-3-mono-batch`, `nova-3-multi-streaming`, `nova-3-multi-batch` |
 | Voice agent / conversational turn-taking (needs end-of-turn detection, low latency) | **Flux** | `flux-en`, `flux-multi` |
 | Synthesize speech (IVR prompts, agent replies, narration) | **Aura-2** | `aura-2` |
-| Turn-based synthesis for voice agents on `/v2/speak` (interruptible turns) | **Flux TTS** | `flux-tts` |
+| Turn-based synthesis for voice agents on `/v2/speak` (interruptible turns) | **Flux TTS** | `flux-tts` (English), `flux-tts-multi` (other languages; same listing, separate version) |
 
 ## 2. Live audio or pre-recorded files? (STT only)
 
@@ -33,6 +33,9 @@ three or four of these.
   *version* of the listing carries a set of languages (read the version title,
   e.g. `General + Medical (de/en/es/fr/hi/ja)` vs `General (zh/ja/ko/vi/id/th)`).
   Deploy the version that has their language; the request sends `language=<code>`.
+  `resolve_model_package_arn.py --language <code>` picks the version whose
+  language list contains that code; if several do (e.g. `ja` is in two Nova-3
+  versions), add `--version` with a tier or date to choose between them.
 - Speakers switch languages, or the language is unknown → **Multilingual**
   listing. Request sends `language=multi` (Nova-3) or `model=flux-general-multi` (Flux).
 
@@ -76,7 +79,9 @@ present alternatives:
 - **Nova-3**: any single-GPU `*.2xlarge` in g6 / g6e / g5 / g4dn / g7 / g7e.
 - **Flux**: same minus **g4dn** (no T4 kernel; produces empty/garbage output).
 - **Aura-2**: multi-GPU **`*.12xlarge`** only.
-- **Flux TTS**: g6 or newer `*.2xlarge`; **no g5, no g4dn**.
+- **Flux TTS** (English version, `flux-tts`): g6 or newer `*.2xlarge`; **no g5, no g4dn**.
+- **Flux TTS** (non-English version, `flux-tts-multi`): `*.4xlarge` in g7 / g7e /
+  g6e only; the English version's `*.2xlarge` types are not supported.
 
 **Deploy with a pool, not one type.** `--instance-pools default` uses the
 family's `default_pool` (recommended type first, then similar-capacity newer
