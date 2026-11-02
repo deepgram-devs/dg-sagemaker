@@ -28,6 +28,7 @@ What `deploy_endpoint.py` sets, why, and what the person may change.
 | `--inference-ami-version` | `al2023-ami-sagemaker-inference-gpu-4-1` | NVIDIA driver 580 / CUDA 13, required by current packages. Unpinned, g4dn/g5 hosts boot driver 470 and the container refuses to start. **The SageMaker console cannot set this field**, which is why console-created endpoints fail. |
 | `--model-download-timeout-s` | `600`; `1800` for `nova-3-multi-*` | `ModelDataDownloadTimeoutInSeconds` is a ceiling, not a delay. Too low → stuck in Creating then Failed with no logs. |
 | `--startup-timeout-s` | `900` | `ContainerStartupHealthCheckTimeoutInSeconds`. `/ping` returns 503 while models load; this bounds how long SageMaker waits for 200. |
+| `--routing-strategy` | `LEAST_OUTSTANDING_REQUESTS` | `ProductionVariant.RoutingConfig`. Sends each new request or stream to the instance with the fewest in-flight requests instead of a random one (SageMaker's own default, `RANDOM`), so a long transcription or stream does not pile more work onto an already busy instance. No effect with one instance. `update_endpoint.py` moves configs without a routing setting to it on their next update; `--routing-strategy RANDOM` opts out. |
 | `--detailed-observability` | on (botocore ≥ 1.43.49) | `MetricsConfig.EnableDetailedObservability` — DCGM GPU, host and Deepgram container Prometheus metrics into CloudWatch's OTel store, 60 s. Off with `--no-detailed-observability`. |
 
 ### Inference AMI versions

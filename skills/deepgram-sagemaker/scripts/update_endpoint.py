@@ -20,7 +20,11 @@ terminated. No canary, no automatic rollback. Consequences:
   uv run update_endpoint.py my-endpoint --region us-east-2 --instance-count 2 --yes
   uv run update_endpoint.py my-endpoint --region us-east-2 --env DEEPGRAM_ENGINE_01=max_active_requests=120 --yes
   uv run update_endpoint.py my-endpoint --region us-east-2 --model-package-arn arn:… --yes   # new version
+  uv run update_endpoint.py my-endpoint --region us-east-2 --routing-strategy LEAST_OUTSTANDING_REQUESTS --yes
   uv run update_endpoint.py my-endpoint --region us-east-2 --rollback-to my-endpoint --yes
+
+Any update of an endpoint without a RoutingConfig also moves it to
+LEAST_OUTSTANDING_REQUESTS (the kit default); pass --routing-strategy RANDOM to keep random routing.
 
 Exit 0 InService after update · 1 update failed / timed out · 2 AWS error · 3 needs --yes.
 """
@@ -49,6 +53,9 @@ def main() -> int:
     p.add_argument("--rung-timeout-s", type=int, default=300,
                    help="VariantInstanceProvisionTimeoutInSeconds per pool rung when --instance-pools is given (default 300)")
     p.add_argument("--instance-count", type=int, default=None)
+    p.add_argument("--routing-strategy", default=None, choices=("LEAST_OUTSTANDING_REQUESTS", "RANDOM"),
+                   help="RoutingConfig.RoutingStrategy (default: keep the current one; a config without one "
+                        "is moved to LEAST_OUTSTANDING_REQUESTS)")
     p.add_argument("--inference-ami-version", default=None,
                    help=f"e.g. {DEFAULT_INFERENCE_AMI}; 'none' to unpin")
     p.add_argument("--model-download-timeout-s", type=int, default=None)
@@ -128,7 +135,8 @@ def main() -> int:
         variant = {k: v for k, v in pv.items() if k in (
             "VariantName", "ModelName", "InitialInstanceCount", "InstanceType", "InstancePools",
             "VariantInstanceProvisionTimeoutInSeconds", "InferenceAmiVersion",
-            "ModelDataDownloadTimeoutInSeconds", "ContainerStartupHealthCheckTimeoutInSeconds")}
+            "ModelDataDownloadTimeoutInSeconds", "ContainerStartupHealthCheckTimeoutInSeconds",
+            "RoutingConfig")}
         variant["ModelName"] = new_model_name
         if args.instance_type and args.instance_pools:
             fail_error("pass --instance-type or --instance-pools, not both")
@@ -159,8 +167,16 @@ def main() -> int:
         if args.startup_timeout_s is not None:
             variant["ContainerStartupHealthCheckTimeoutInSeconds"] = args.startup_timeout_s
             changes.append(f"startup timeout → {args.startup_timeout_s}")
+        if args.routing_strategy is not None:
+            if (variant.get("RoutingConfig") or {}).get("RoutingStrategy") != args.routing_strategy:
+                changes.append(f"routing strategy → {args.routing_strategy}")
+            variant["RoutingConfig"] = {"RoutingStrategy": args.routing_strategy}
         if not changes:
             fail_error("nothing to change — pass at least one override, or --rollback-to")
+        if "RoutingConfig" not in variant:
+            variant["RoutingConfig"] = {"RoutingStrategy": "LEAST_OUTSTANDING_REQUESTS"}
+            changes.append("routing strategy → LEAST_OUTSTANDING_REQUESTS (kit default; "
+                           "--routing-strategy RANDOM keeps random routing)")
 
         new_cfg_name = f"{args.name}-{stamp}"
         cfg_kwargs: dict = {"EndpointConfigName": new_cfg_name, "ProductionVariants": [variant]}

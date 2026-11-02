@@ -42,7 +42,8 @@ def describe(sm, name: str) -> dict:
         out["variant"] = {k: pv.get(k) for k in ("VariantName", "ModelName", "InstanceType", "InstancePools",
                                                   "InitialInstanceCount", "InferenceAmiVersion",
                                                   "ModelDataDownloadTimeoutInSeconds",
-                                                  "ContainerStartupHealthCheckTimeoutInSeconds") if k in pv}
+                                                  "ContainerStartupHealthCheckTimeoutInSeconds",
+                                                  "RoutingConfig") if k in pv}
         out["async_config"] = c.get("AsyncInferenceConfig")
         out["metrics_config"] = c.get("MetricsConfig")
         try:
@@ -102,7 +103,8 @@ def main() -> int:
     say(f"  config:   {info.get('endpoint_config_name')}   async={info['async']}")
     say(f"  variant:  type={v.get('InstanceType') or [pl['InstanceType'] for pl in (v.get('InstancePools') or [])]} "
         f"count={v.get('InitialInstanceCount')} ami={v.get('InferenceAmiVersion')} "
-        f"download_timeout={v.get('ModelDataDownloadTimeoutInSeconds')} startup_timeout={v.get('ContainerStartupHealthCheckTimeoutInSeconds')}")
+        f"download_timeout={v.get('ModelDataDownloadTimeoutInSeconds')} startup_timeout={v.get('ContainerStartupHealthCheckTimeoutInSeconds')} "
+        f"routing={(v.get('RoutingConfig') or {}).get('RoutingStrategy', 'RANDOM (unset)')}")
     if info.get("model"):
         say(f"  model:    {info['model']}")
     say(f"  logs:     {note}")

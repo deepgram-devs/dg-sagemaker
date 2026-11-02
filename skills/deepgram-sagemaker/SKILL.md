@@ -102,6 +102,7 @@ edited order. `deploy_endpoint.py` drops zero-quota rungs itself and says so.
 ### Phase 4 — Deploy
 `uv run scripts/deploy_endpoint.py --region <region> --product <slug> --model-package-arn <arn> --execution-role-arn <role> --instance-pools default|A,B,C [--env K=V] --yes --json`
 (`--instance-type T --single-type-reason "…"` when one type is intended.)
+Routing is least-outstanding-requests by default (`--routing-strategy RANDOM` to opt out).
 Waits for InService (10–20 min typical). On failure it prints FailureReason,
 whether a container log group exists, the log tail and a named cause with the
 next step; follow `references/troubleshooting.md`. A Failed endpoint does not
@@ -118,7 +119,7 @@ repository (`python-stt/e2e`, `python-flux/e2e`, `python-tts/e2e`,
 
 ### Phase 6 — Operate (optional)
 - Auto-scaling (real-time only): `uv run scripts/configure_autoscaling.py <endpoint> --region <region> --min 1 --max N --target T --yes`
-- Change instance type/count, AMI, env overrides or model version in place:
+- Change instance type/count, AMI, routing strategy, env overrides or model version in place:
   `uv run scripts/update_endpoint.py <endpoint> --region <region> … --yes`
   (blue/green all-at-once; needs quota for both fleets briefly; `--rollback-to`).
 - Health/logs any time: `uv run scripts/endpoint_status.py <endpoint> --region <region>`.

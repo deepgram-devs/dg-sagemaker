@@ -13,6 +13,7 @@ caller only chooses capacity and mode:
                                         — the console cannot set this; without it the
                                         container refuses to start on g4dn/g5 hosts
   VariantName            = AllTraffic   the update / Terraform paths assume it
+  RoutingConfig          = LEAST_OUTSTANDING_REQUESTS (override with --routing-strategy RANDOM)
   ModelDataDownloadTimeoutInSeconds ≥ 600 (1800 for multilingual Nova-3 bundles)
   instance type ∈ the package's SupportedRealtimeInferenceInstanceTypes (verified live)
   async: ClientConfig.MaxConcurrentInvocationsPerInstance = 32 (SageMaker's default of 4 is too low)
@@ -56,6 +57,7 @@ DEFAULT_RUNG_TIMEOUT_S = 300
 ASYNC_UNSUPPORTED = ("Asynchronous endpoints are TEMPORARILY NOT SUPPORTED for Marketplace-hosted Deepgram. Deploy a real-time endpoint (drop --async-bucket) and use InvokeEndpoint / streaming. If you have an asynchronous use case, reach out to a Deepgram representative.")
 DEFAULT_ASYNC_MAX_CONCURRENCY = 32
 VALID_METRIC_FREQ = (10, 30, 60, 120, 180, 240, 300)
+ROUTING_STRATEGIES = ("LEAST_OUTSTANDING_REQUESTS", "RANDOM")
 
 
 def wait_for_endpoint(sm, logs, name: str, max_minutes: int) -> tuple[str, dict]:
@@ -122,6 +124,10 @@ def main() -> int:
                    help="why a single --instance-type is used instead of a pool (Savings Plan, measured "
                         "concurrency target, reproducing a type-specific issue). Recorded in the output.")
     p.add_argument("--instance-count", type=int, default=1)
+    p.add_argument("--routing-strategy", default="LEAST_OUTSTANDING_REQUESTS", choices=ROUTING_STRATEGIES,
+                   help="RoutingConfig.RoutingStrategy: how SageMaker spreads requests across instances "
+                        "(default LEAST_OUTSTANDING_REQUESTS; SageMaker's own default is RANDOM). "
+                        "Only matters with more than one instance.")
     p.add_argument("--inference-ami-version", default=DEFAULT_INFERENCE_AMI,
                    help=f"host AMI (driver) pin; default {DEFAULT_INFERENCE_AMI}. 'none' = unpinned (not recommended)")
     p.add_argument("--model-download-timeout-s", type=int, default=None,
@@ -331,6 +337,7 @@ def main() -> int:
         "VariantName": "AllTraffic", "ModelName": name, "InitialInstanceCount": args.instance_count,
         "ModelDataDownloadTimeoutInSeconds": download_timeout,
         "ContainerStartupHealthCheckTimeoutInSeconds": args.startup_timeout_s,
+        "RoutingConfig": {"RoutingStrategy": args.routing_strategy},
     }
     if len(types) == 1:
         variant["InstanceType"] = types[0]
@@ -360,6 +367,7 @@ def main() -> int:
         "instance_types": types, "instance_count": args.instance_count,
         "capacity_mode": "pool" if len(types) > 1 else "single_type",
         "rung_timeout_s": args.rung_timeout_s if len(types) > 1 else None,
+        "routing_strategy": args.routing_strategy,
         "single_type_reason": args.single_type_reason, "quota_notes": quota_notes,
         "inference_ami_version": ami, "network_isolation": True,
         "model_download_timeout_s": download_timeout, "startup_timeout_s": args.startup_timeout_s,
