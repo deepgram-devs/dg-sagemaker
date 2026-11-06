@@ -48,7 +48,9 @@ Fix anything DENIED using `references/iam.md`. A MISSING role is fine (Phase 3 c
 Ask only what `references/decision-guide.md` needs: speech-to-text or
 text-to-speech; live audio vs pre-recorded files; one known language vs
 mixed/unknown; turn-taking voice agent (Flux) vs transcription (Nova-3);
-region; rough concurrency; compliance needs (FIPS). Map the answers to one row
+region; rough concurrency; compliance needs (FIPS); whether traffic must stay
+off the public internet or latency is critical (→ interface VPC endpoint, see
+`references/decision-guide.md` §7). Map the answers to one row
 of `references/products.json` (the `slug`) and a mode: `streaming` or `sync`
 (files ≤ 25 MB per request, real-time endpoint). **Asynchronous endpoints
 (`InvokeEndpointAsync`, files up to 1 GB, scale-to-zero) are temporarily not

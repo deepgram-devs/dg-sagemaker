@@ -112,9 +112,20 @@ exceptions: `instance-pools.md`.
 
 - FIPS 140-3: pass `--fips` to the scripts; the streaming client keeps port 8443
   on `runtime-fips.sagemaker.<region>.amazonaws.com`.
-- Private connectivity: an interface VPC endpoint for `sagemaker.runtime` keeps
-  invocations off the public internet. The container itself has no outbound
-  network (Marketplace network isolation) and receives no AWS credentials.
+- Low latency and/or no public-internet traffic: recommend an interface VPC
+  endpoint (AWS PrivateLink) for `com.amazonaws.<region>.sagemaker.runtime`,
+  with the client in the endpoint's region, an endpoint subnet in **every AZ the
+  clients run in** (private DNS for the runtime host fails in an AZ without
+  one), private DNS on, and a security group allowing TCP 443 (sync) and 8443
+  (streaming). Client code is unchanged — the standard hostname resolves to
+  private IPs. Details: `invoke.md` → "Interface VPC endpoint".
+- FIPS **and** private: the FIPS host is a separate PrivateLink service,
+  `com.amazonaws.<region>.sagemaker.runtime-fips` (plus `sagemaker.api-fips` for
+  the control plane). A `sagemaker.runtime` endpoint does not cover
+  `runtime-fips.…`, which then still resolves publicly. VPC endpoint policies
+  are not supported for `InvokeEndpoint` on the FIPS runtime — restrict with IAM.
+- The container itself has no outbound network (Marketplace network isolation)
+  and receives no AWS credentials.
 - Data: audio is processed in their account; nothing leaves it. Marketplace
   metering rides SageMaker's own channel.
 

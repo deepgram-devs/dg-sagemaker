@@ -126,6 +126,46 @@ Per-client `use_fips_endpoint=True` (boto3 `Config`) → `runtime-fips.sagemaker
 Streaming keeps `:8443` on the FIPS host. Do **not** set `AWS_USE_FIPS_ENDPOINT`
 process-wide with an SSO profile (the SSO portal has no FIPS hostname). Regions with FIPS: us-east-1, us-east-2, us-west-1,
 us-west-2, ca-central-1, GovCloud.
+To keep FIPS traffic private, see "Interface VPC endpoint" below — it needs the
+`sagemaker.runtime-fips` service, not `sagemaker.runtime`.
+
+## Interface VPC endpoint (PrivateLink)
+
+Recommend it when the person needs low latency and no invocation traffic over
+the public internet. It applies to sync, streaming and the SDK transport.
+
+```bash
+aws ec2 create-vpc-endpoint --region <region> --vpc-id <vpc> \
+  --vpc-endpoint-type Interface \
+  --service-name com.amazonaws.<region>.sagemaker.runtime \
+  --subnet-ids <subnet-per-client-AZ> ... --security-group-ids <sg> \
+  --private-dns-enabled
+```
+
+- Same region as the Deepgram endpoint and the clients.
+- A subnet in every AZ the clients run in — AWS documents DNS failures for the
+  runtime host from an AZ without the endpoint.
+- Private DNS on (VPC needs DNS hostnames + resolution). Then
+  `runtime.sagemaker.<region>.amazonaws.com` (and `:8443` for streaming)
+  resolves to private IPs and no client change is needed — the scripts here
+  work as-is.
+- Security group: inbound TCP 443 and 8443 from the clients.
+- Without private DNS: `<vpce-id>.runtime.sagemaker.<region>.vpce.amazonaws.com`
+  as boto3 `endpoint_url`, and `https://<that host>:8443` as the HTTP/2
+  client's `endpoint_uri`. `aws ec2 describe-vpc-endpoints --query
+  'VpcEndpoints[].DnsEntries'` lists the assigned names.
+- Verify from inside the VPC: `nslookup runtime.sagemaker.<region>.amazonaws.com`
+  returns a private IP.
+- FIPS: use service `com.amazonaws.<region>.sagemaker.runtime-fips` (separate
+  service; a `sagemaker.runtime` endpoint leaves `runtime-fips.…` resolving
+  publicly), keep `--fips`, and check `nslookup runtime-fips.sagemaker.<region>.amazonaws.com`.
+  Add `sagemaker.api-fips` for control-plane calls from the VPC. VPC endpoint
+  policies are not supported for `InvokeEndpoint` on the FIPS runtime — restrict
+  with IAM identity-based policies.
+- PrivateLink is billed per endpoint-hour per AZ plus per GB.
+
+Public guide: `docs.invoke` in `products.json`, section "Invoke through a
+SageMaker Runtime interface endpoint".
 
 ## Behaviour to expect
 
