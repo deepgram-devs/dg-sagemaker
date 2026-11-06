@@ -131,7 +131,7 @@ To keep FIPS traffic private, see "Interface VPC endpoint" below — it needs th
 
 ## Interface VPC endpoint (PrivateLink)
 
-Recommend it when the person needs low latency and no invocation traffic over
+Recommend it when the person needs low latency and/or no invocation traffic over
 the public internet. It applies to sync, streaming and the SDK transport.
 
 ```bash
