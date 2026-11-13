@@ -39,6 +39,9 @@ weak assertion for TTS:
                      audio.
   interrupt          `Interrupt` mid-turn ⇒ SpeechInterrupted whose
                      text_spoken + text_remaining reconstruct the turn input.
+  normalize_volume   `normalize_volume=true` and `=false` (the opt-out from the
+                     default loudness normalization) each connect and return
+                     audible audio; the on/off RMS ratio is reported only.
   unknown_param      NEGATIVE control: a bogus query param must be REJECTED, not
                      ignored. A pass here means an unpriced parameter cannot slip
                      through and be served without being billed for.
@@ -371,6 +374,41 @@ async def sc_interrupt(client, ep, voice):
     return row
 
 
+async def sc_normalize_volume(client, ep, voice):
+    """`normalize_volume` as a connection query param, accepted both ways.
+
+    It is a connection-time setting (it cannot be changed with `Configure`), so
+    each value gets its own session. Both must connect without a server Error
+    and return audible audio. The on/off RMS ratio is reported, not gated — see
+    the batch driver's note: the direction of the change depends on the voice.
+    """
+    t0 = time.monotonic()
+    rows = {}
+    for value in ("true", "false"):
+        try:
+            s = await _one_turn(client, ep, voice, REFERENCE_TEXT, normalize_volume=value)
+        except Exception as e:  # noqa: BLE001 — a handshake 400 arrives as an exception
+            return {
+                "scenario": "normalize_volume",
+                "ok": False,
+                "notes": f"normalize_volume={value} rejected: {type(e).__name__}",
+                "bytes": 0,
+                "duration_s": 0.0,
+                "rms": 0.0,
+                "billable_chars": 0,
+                "elapsed_s": time.monotonic() - t0,
+            }
+        rows[value] = _base_row("normalize_volume", s, t0)
+        if not rows[value]["ok"]:
+            rows[value]["notes"] = f"normalize_volume={value}: {rows[value]['notes']}"
+            return rows[value]
+    on, off = rows["true"]["rms"], rows["false"]["rms"]
+    row = rows["false"]
+    row["notes"] = (f"both accepted; rms on={on:.0f} off={off:.0f}"
+                    + (f" ratio={on / off:.2f}" if off else ""))
+    return row
+
+
 async def sc_unknown_param(client, ep, voice):
     """NEGATIVE control — a param outside the catalog allowlist must be rejected.
 
@@ -523,6 +561,7 @@ SCENARIOS = {
     "speed": sc_speed,
     "configure_speed": sc_configure_speed,
     "interrupt": sc_interrupt,
+    "normalize_volume": sc_normalize_volume,
     "unknown_param": sc_unknown_param,
     "encoding_linear16_16k": sc_encoding_linear16_16k,
     **{name: _encoding_scenario(name, params, expect) for name, params, expect in STREAM_ENCODINGS},

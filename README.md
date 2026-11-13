@@ -122,8 +122,8 @@ Scripts:
 
 End-to-end correctness gates ([`python-flux-tts/e2e/`](python-flux-tts/e2e/)) — both transports are served by the same endpoint, so one deployment covers both drivers:
 
-- [`e2e/e2e_test_batch.py`](python-flux-tts/e2e/e2e_test_batch.py) — `POST /invocations` → `/v2/speak`; audio validity, `container=wav`, speed→duration, and negative controls (unknown param, Aura model rejected)
-- [`e2e/e2e_test_streaming.py`](python-flux-tts/e2e/e2e_test_streaming.py) — websocket `/v2/speak`; the turn-based behaviors (per-turn `SpeechMetadata` accounting, multi-turn, incremental `Speak`, `Interrupt`, mid-stream `Configure{speed}`, concurrency)
+- [`e2e/e2e_test_batch.py`](python-flux-tts/e2e/e2e_test_batch.py) — `POST /invocations` → `/v2/speak`; audio validity, `container=wav`, speed→duration, `normalize_volume` on/off, and negative controls (unknown param, Aura model rejected)
+- [`e2e/e2e_test_streaming.py`](python-flux-tts/e2e/e2e_test_streaming.py) — websocket `/v2/speak`; the turn-based behaviors (per-turn `SpeechMetadata` accounting, multi-turn, incremental `Speak`, `Interrupt`, mid-stream `Configure{speed}`, `normalize_volume` on/off, concurrency)
 
 ---
 

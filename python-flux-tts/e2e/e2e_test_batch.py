@@ -187,6 +187,46 @@ def sc_speed_out_of_range(rt, ep, voice):
     }
 
 
+def sc_normalize_volume(rt, ep, voice):
+    """`normalize_volume` must be ACCEPTED both ways and still produce audio.
+
+    Loudness normalization is on by default on `/v2/speak` (since 2026-11-08);
+    `normalize_volume=false` is the documented opt-out and peak limiting stays on
+    either way. Before the container allowlisted the key, BOTH values were a 400
+    `unsupported_parameter`, so the opt-out is the case most worth pinning.
+
+    The on/off RMS ratio is REPORTED, not gated: normalization moves each voice
+    toward a common loudness target, so whether a given voice gets louder or
+    quieter (or barely changes) depends on where it started. A fixed direction
+    would fail a working endpoint for some voices.
+    """
+    t0 = time.monotonic()
+    rows = {}
+    for value in ("true", "false"):
+        try:
+            audio, meta = invoke_batch(rt, ep, REFERENCE_TEXT, voice, normalize_volume=value)
+        except Exception as e:  # noqa: BLE001
+            return {
+                "scenario": "normalize_volume",
+                "ok": False,
+                "notes": f"normalize_volume={value} rejected: {type(e).__name__}: {str(e)[:60]}",
+                "bytes": 0,
+                "duration_s": 0.0,
+                "rms": 0.0,
+                "billable_chars": "",
+                "elapsed_s": time.monotonic() - t0,
+            }
+        rows[value] = _row("normalize_volume", audio, meta, t0)
+        if not rows[value]["ok"]:
+            rows[value]["notes"] = f"normalize_volume={value}: {rows[value]['notes']}"
+            return rows[value]
+    on, off = rows["true"]["rms"], rows["false"]["rms"]
+    row = rows["false"]
+    row["notes"] = (f"both accepted; rms on={on:.0f} off={off:.0f}"
+                    + (f" ratio={on / off:.2f}" if off else ""))
+    return row
+
+
 def sc_wav_container(rt, ep, voice):
     """`container=wav` — a batch-only param (streaming rejects it), so this also
     confirms the batch query surface really is the batch one."""
@@ -333,6 +373,7 @@ SCENARIOS = {
     "long_text": sc_long_text,
     "speed": sc_speed,
     "speed_out_of_range": sc_speed_out_of_range,
+    "normalize_volume": sc_normalize_volume,
     "wav_container": sc_wav_container,
     "encoding_linear16_16k": sc_encoding_linear16_16k,
     **{name: _encoding_scenario(name, params, expect) for name, params, expect in BATCH_ENCODINGS},

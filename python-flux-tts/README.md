@@ -72,6 +72,14 @@ The byte floor is the check that matters. A broken encoder returns HTTP 200
 with an empty body, which no status-code check catches. mp3/opus/aac/flac
 reject `sample_rate`, so those requests omit it.
 
+## Volume normalization
+
+Both batteries run `normalize_volume`: one render with `normalize_volume=true`
+and one with `normalize_volume=false` (the opt-out from the default loudness
+normalization). Each must be accepted and return audible audio. The on/off RMS
+ratio is printed in the notes but not gated, because whether normalization makes
+a voice louder or quieter depends on that voice's starting loudness.
+
 ## Voices
 
 The model string is `flux-<voice>-en`; `flux-alexis-en` is the default used by
