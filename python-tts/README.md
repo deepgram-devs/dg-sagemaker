@@ -204,7 +204,7 @@ uv run e2e/e2e_test_batch.py --list
 | `encoding_aac` | AAC (raw codec stream — bytes-only check) |
 | `sample_rate_48000` / `sample_rate_16000` | WAV sample rate matches the request |
 | `bit_rate_mp3_32000` | `bit_rate` accepted for mp3 |
-| `speed_duration` | synth at 0.7 / 1.0 / 1.5 — duration must shrink as speed rises; PASS-WITH-NOTE if the bundle lacks `speed` |
+| `speed_duration` | synth at 0.7 / 1.0 / 1.5 — duration must shrink as speed rises; PASS-WITH-NOTE if the bundle lacks `speed`. **English and Spanish only** — SKIPs for any other `--language` (see below) |
 | `pronunciation_ipa` | well-formed inline IPA override; PASS-WITH-NOTE if the bundle lacks inline controls |
 | `text_limit_exceeded` | text > 2000 chars → expects rejection (413 / Payload Too Large) |
 | `mip_opt_out` / `tag` | passthrough flags accepted (smoke) |
@@ -226,7 +226,7 @@ uv run e2e/e2e_test_streaming.py --list
 | `multi_phrase_flush` | 3 phrases — multiple `Flushed` acks (Speak→Flush→Flushed loop) |
 | `encoding_linear16_24k` | explicit linear16 @ 24 kHz — non-silent audio |
 | `encoding_mulaw_8k` / `encoding_alaw_8k` | streaming-supported companded codecs (bytes-only check) |
-| `speed_fast` | `speed=1.4` over the websocket — non-silent audio when supported; PASS-WITH-NOTE on bundles that silently drop `speed` (no audio → flush-ack timeout) |
+| `speed_fast` | `speed=1.4` over the websocket — non-silent audio when supported; PASS-WITH-NOTE on bundles that silently drop `speed` (no audio → flush-ack timeout). **English and Spanish only** — SKIPs for any other `--language` (see below) |
 | `voice_alt` | alternate voice (PASS-WITH-NOTE if unbundled) |
 | `mip_opt_out` | passthrough flag (smoke) |
 
@@ -239,6 +239,17 @@ is scoped to the TTS docs
 https://developers.deepgram.com/docs/tts-voice-controls) as of the June 2026 audit.
 
 ---
+
+### Speed is English and Spanish only
+
+Aura-2 `speed` (and pronunciation) controls are available in English and
+Spanish; the public [TTS voice controls](https://developers.deepgram.com/docs/tts-voice-controls)
+page is the source of truth. On the other voices (`de`/`fr`/`it`/`ja`/`nl`) a
+`speed` request does not render as expected — measured 2026-11-14 with
+`--language de`, `speed_fast` produced no audio. So `speed_fast` and
+`speed_duration` declare `supported_languages=["en", "es"]` and print SKIP, with
+the reason, for any other `--language`. `pronunciation_ipa` is left running in
+every language because it has not been observed to fail outside en/es.
 
 ## Troubleshooting
 

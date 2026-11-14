@@ -254,6 +254,10 @@ def default_scenarios(language: str, voice_coverage_n: int = 3) -> list[TTSScena
         TTSScenario(
             name="speed_duration",
             description="speed 0.7 vs 1.0 vs 1.5 — duration must shrink as speed rises",
+            # Aura-2 speed is English and Spanish only, per
+            # https://developers.deepgram.com/docs/tts-voice-controls — the
+            # docs are the source of truth, so this is not asserted elsewhere.
+            supported_languages=["en", "es"],
             params={"encoding": "linear16", "container": "wav"},
             speed_compare=True,
             tolerated_error_substring="bad request",

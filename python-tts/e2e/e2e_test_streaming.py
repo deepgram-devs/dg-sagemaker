@@ -161,6 +161,12 @@ def default_scenarios(language: str, voice_coverage_n: int = 3) -> list[TTSStrea
             name="speed_fast",
             description="speed=1.4 over the websocket transport (voice control)",
             extra={"speed": "1.4"},
+            # Aura-2 speed is English and Spanish only, per
+            # https://developers.deepgram.com/docs/tts-voice-controls. On the
+            # polyglot voices (de/fr/it/ja/nl) the stream produces no audio and
+            # this FAILed (2026-11-14 with --language de; also in earlier
+            # polyglot runs), so it SKIPs outside en/es instead.
+            supported_languages=["en", "es"],
             tolerated_error_substring="Flushed-ack timeout",
             notes="produces audio when the bundle supports speed; older bundles "
                   "silently drop it (no audio → flush-ack timeout) → PASS-WITH-NOTE",
