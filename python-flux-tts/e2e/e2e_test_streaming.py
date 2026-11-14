@@ -33,7 +33,9 @@ weak assertion for TTS:
                      SPEED_SAMPLES paired renders, and requires the MEAN
                      duration ratio to be measurably shorter — accepting the
                      param but ignoring it would otherwise pass, and a single
-                     pair is too noisy to judge on.
+                     pair is too noisy to judge on. SKIPS for a non-English
+                     voice: Flux TTS voice controls are English-only
+                     (developers.deepgram.com/docs/tts-voice-controls).
   configure_speed    mid-stream `Configure{speed}` must come back as
                      ConfigureSuccess and the following turn must still produce
                      audio.
@@ -76,6 +78,7 @@ from e2e.e2e_test_common import (  # noqa: E402
     encoded_verdict,
     print_summary_table,
     select_scenarios,
+    speed_effect_skip_row,
 )
 from flux_tts_client import (  # noqa: E402
     DEFAULT_VOICE,
@@ -236,7 +239,13 @@ async def sc_speed(client, ep, voice):
     widened range means a working knob now has ~33% of headroom to show,
     against the ~13% it had at 1.15, so noise no longer sits anywhere near the
     decision boundary.
+    English voices only: Flux TTS voice controls are English-only, so a
+    non-English voice accepts `speed` without changing the audio. That case
+    is a SKIP, not a FAIL (see VOICE_CONTROLS_DOC in e2e_test_common).
     """
+    skip = speed_effect_skip_row("speed", voice)
+    if skip is not None:
+        return skip
     t0 = time.monotonic()
     ratios: list[float] = []
     detail: list[str] = []

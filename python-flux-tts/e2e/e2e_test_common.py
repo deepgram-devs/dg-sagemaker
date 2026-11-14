@@ -71,6 +71,44 @@ SPEED_SAMPLES = 3
 # testing the model's pause distribution rather than whether speed works.
 SPEED_RATIO_GATE = 0.85
 
+# Flux TTS voice controls (`speed` and pronunciation) are English-only. The
+# public docs are the source of truth:
+#   https://developers.deepgram.com/docs/tts-voice-controls
+#   ("Flux TTS controls are available in English")
+# A non-English voice still ACCEPTS a valid `speed` (in range, on increment),
+# but the rendered audio is not faster: measured 2026-11-14 with flux-aina-es,
+# median ratio 0.96 streaming / 0.99 batch at speed=1.5, against 0.72 for
+# flux-alexis-en on the same container. So the speed-EFFECT scenarios SKIP for
+# non-English voices instead of failing; the acceptance/range checks
+# (`configure_speed`, `speed_out_of_range`) still run, because those behave
+# the same in every language.
+VOICE_CONTROLS_DOC = "https://developers.deepgram.com/docs/tts-voice-controls"
+VOICE_CONTROL_LANGUAGES = {"en"}
+
+
+def voice_language(voice: str) -> str:
+    """Language code from a Flux TTS voice name: `flux-<name>-<lang>`."""
+    return voice.rsplit("-", 1)[-1].lower() if "-" in voice else ""
+
+
+def speed_effect_skip_row(scenario: str, voice: str) -> dict | None:
+    """A SKIP row when `voice` is not in a voice-control language, else None."""
+    lang = voice_language(voice)
+    if lang in VOICE_CONTROL_LANGUAGES:
+        return None
+    return {
+        "scenario": scenario,
+        "ok": True,
+        "skipped": True,
+        "notes": (f"speed is English-only for Flux TTS ({VOICE_CONTROLS_DOC}); "
+                  f"voice {voice} is '{lang or '?'}'"),
+        "bytes": "",
+        "duration_s": "",
+        "rms": "",
+        "billable_chars": "",
+        "elapsed_s": 0.0,
+    }
+
 # ---------------------------------------------------------------------------
 # Test text
 # ---------------------------------------------------------------------------

@@ -72,6 +72,20 @@ The byte floor is the check that matters. A broken encoder returns HTTP 200
 with an empty body, which no status-code check catches. mp3/opus/aac/flac
 reject `sample_rate`, so those requests omit it.
 
+## Speed and other voice controls are English-only
+
+Flux TTS voice controls (`speed`, pronunciation) are available in English only;
+the public [TTS voice controls](https://developers.deepgram.com/docs/tts-voice-controls)
+page is the source of truth. A non-English voice still accepts a valid `speed`
+(in range, on the 0.05 increment) but does not render faster: measured
+2026-11-14 with `flux-aina-es`, the speed=1.5 render was 0.96× (streaming) and
+0.99× (batch) the default duration, against 0.72× for `flux-alexis-en`.
+
+So both batteries **skip** the `speed` scenario for a non-English `--voice`
+(the row prints SKIP with the reason) instead of failing it. `configure_speed`
+and `speed_out_of_range` still run in every language: they check that the
+control is acknowledged and range-checked, which does not depend on language.
+
 ## Volume normalization
 
 Both batteries run `normalize_volume`: one render with `normalize_volume=true`
@@ -82,9 +96,9 @@ a voice louder or quieter depends on that voice's starting loudness.
 
 ## Voices
 
-The model string is `flux-<voice>-en`; `flux-alexis-en` is the default used by
+The model string is `flux-<voice>-<lang>`; `flux-alexis-en` is the default used by
 both batteries. The authoritative voice list for a given deployment is the one
-its bundle ships — pass `--model` to select another.
+its bundle ships — pass `--voice` to select another.
 
 ## Metering
 

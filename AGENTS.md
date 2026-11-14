@@ -74,7 +74,7 @@ timeout; the others fit easily in a single agent turn.
 | `python-tts/e2e/e2e_test_batch.py` | ~1.5 min | speed_duration ~12 s | 21 scenarios (per-language voice rows vary). Safe inline. |
 | `python-tts/e2e/e2e_test_streaming.py` | ~1.5 min | multi_phrase_flush ~17 s | 10 scenarios. Safe inline. |
 | `python-flux-tts/e2e/e2e_test_batch.py` | ~3.5 min | `speed`, `concurrent_5` | 16 scenarios, including one per output encoding (mp3/opus/flac/aac/mulaw/alaw/linear16 16 kHz). Safe inline. |
-| `python-flux-tts/e2e/e2e_test_streaming.py` | ~4.5 min | `speed` ~60 s, `long_turn` | 15 scenarios, including mulaw/alaw/linear16 16 kHz and a negative check that mp3/opus/aac/flac are refused on the WebSocket. `speed` renders the same text at the default rate and at `MAX_SPEED` and compares durations — `SPEED_SAMPLES` (3) paired renders, judged on the MEDIAN, so it costs SIX turns not two. Synthesis is stochastic and a single pair is not a verdict. Safe inline. |
+| `python-flux-tts/e2e/e2e_test_streaming.py` | ~4.5 min | `speed` ~60 s, `long_turn` | 15 scenarios, including mulaw/alaw/linear16 16 kHz and a negative check that mp3/opus/aac/flac are refused on the WebSocket. `speed` renders the same text at the default rate and at `MAX_SPEED` and compares durations — `SPEED_SAMPLES` (3) paired renders, judged on the MEDIAN, so it costs SIX turns not two. Synthesis is stochastic and a single pair is not a verdict. `speed` SKIPS for a non-English `--voice` (Flux TTS voice controls are English-only per the public docs). Safe inline. |
 
 Wall-clocks measured against single-GPU (STT, Flux TTS) and multi-GPU (Aura-2
 TTS) SageMaker endpoints. Network and instance class shift the numbers, but the

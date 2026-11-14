@@ -45,6 +45,7 @@ from e2e.e2e_test_common import (  # noqa: E402
     parse_wav,
     print_summary_table,
     select_scenarios,
+    speed_effect_skip_row,
 )
 from flux_tts_client import DEFAULT_VOICE, invoke_batch  # noqa: E402
 
@@ -101,7 +102,13 @@ def sc_speed(rt, ep, voice):
     SPEED_RATIO_GATE, well above it. The widened range helps the test as well
     as callers: there is now ~33% of duration signal to detect instead of the
     ~13% available at 1.15, so noise is nowhere near the decision boundary.
+    English voices only: Flux TTS voice controls are English-only, so a
+    non-English voice accepts `speed` without changing the audio. That case
+    is a SKIP, not a FAIL (see VOICE_CONTROLS_DOC in e2e_test_common).
     """
+    skip = speed_effect_skip_row("speed", voice)
+    if skip is not None:
+        return skip
     t0 = time.monotonic()
     ratios: list[float] = []
     detail: list[str] = []
