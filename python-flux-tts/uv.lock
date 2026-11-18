@@ -658,7 +658,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aws-sdk-sagemaker-runtime-http2", extras = ["awscrt"], specifier = ">=0.11" },
+    { name = "aws-sdk-sagemaker-runtime-http2", extras = ["awscrt"], specifier = ">=0.11,<0.12" },
     { name = "boto3", specifier = ">=1.42.34" },
 ]
 

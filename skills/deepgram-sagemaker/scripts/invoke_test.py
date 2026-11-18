@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["boto3>=1.43.49", "aws-sdk-sagemaker-runtime-http2[awscrt]>=0.11"]
+# dependencies = ["boto3>=1.43.49", "aws-sdk-sagemaker-runtime-http2[awscrt]>=0.11,<0.12"]
 # ///
 """Send one real request to a Deepgram SageMaker endpoint and judge the answer.
 

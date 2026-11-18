@@ -201,7 +201,7 @@ def default_scenarios(model: str = DEFAULT_MODEL) -> list[FluxScenario]:
             # then sleep(0.05), so under continuous staggered load a fraction of
             # turns finalize late and words get dropped from the transcript).
             # It is probabilistic and NOT a per-release regression — measured
-            # 5.39 % here on 2026-07-28 (stem 1.192.14 / impeller 3.123.1) and the
+            # 5.39 % here on 2026-07-28 (API server 1.192.14 / engine 3.123.1) and the
             # same on the preceding version, i.e. this scenario was failing on a
             # threshold that flux's sustained-load path has never met. Single-
             # stream and 5-concurrent flux sit at ~3.3 % and stay on the 5 %
