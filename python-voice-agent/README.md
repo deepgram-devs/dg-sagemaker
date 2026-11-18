@@ -47,7 +47,7 @@ audio frames. This is what the scripts here send:
     "greeting": "Hi, thanks for calling. How can I help?",
     "listen": { "provider": { "type": "deepgram", "model": "flux-general-multi", "version": "v2" } },
     "think": {
-      "provider": { "type": "deepgram", "model": "phonellm" },
+      "provider": { "type": "deepgram", "model": "phonellm-mini-alpha-2-fp8" },
       "prompt": "You are a friendly restaurant host on a phone call. Keep every reply to one or two short spoken sentences."
     },
     "speak": { "provider": { "type": "deepgram", "version": "v2", "model": "flux-alexis-en" } }
@@ -61,7 +61,7 @@ audio frames. This is what the scripts here send:
 - Custom `endpoint`s (think, functions, speak) must be public `https`/`wss` URLs,
   as on the hosted API, and are only reachable if your endpoint's network
   configuration allows egress.
-- Add `"think_live": {"provider": {"type": "deepgram"}}` under `agent` to turn on
+- Add `"think_live": {"provider": {"type": "deepgram", "version": "v1"}}` under `agent` to turn on
   Conversational Mode (backchannels and more natural turn-taking).
 - Client-side functions go in `agent.think.functions`; the agent asks for them
   with `FunctionCallRequest` and the client answers with `FunctionCallResponse`.

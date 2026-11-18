@@ -13,7 +13,7 @@ One endpoint serves three surfaces:
 Everything runs inside the container: speech-to-text, the LLM bundled in the
 container, and text-to-speech. The session's `Settings` select the bundled LLM
 the same way hosted Voice Agent selects a Deepgram LLM, by provider and model
-(`deepgram` / `phonellm`, no endpoint), so no request leaves the endpoint.
+(`deepgram` / `phonellm-mini-alpha-2-fp8`, no endpoint), so no request leaves the endpoint.
 
 Example: hold a short conversation and save what the agent said.
 
@@ -71,7 +71,7 @@ LISTEN_PATH = "v2/listen"
 LISTEN_MODEL = "flux-general-multi"
 
 #: The LLM bundled in the container, selected as a Deepgram think model.
-BUNDLED_LLM_MODEL = "phonellm"
+BUNDLED_LLM_MODEL = "phonellm-mini-alpha-2-fp8"
 
 #: SageMaker's bidirectional-streaming port. NOT 443 — see `make_client`.
 BIDI_PORT = 8443
@@ -240,7 +240,7 @@ def agent_settings(*, voice: str = DEFAULT_VOICE, prompt: str = PROMPT,
     if greeting:
         agent["greeting"] = greeting
     if think_live:
-        agent["think_live"] = {"provider": {"type": "deepgram"}}
+        agent["think_live"] = {"provider": {"type": "deepgram", "version": "v1"}}
     return {
         "type": "Settings",
         "audio": {
