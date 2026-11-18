@@ -232,7 +232,11 @@ in `scripts/_common.py`):
   no shared venv. Keep `boto3>=1.43.49` (marketplace-discovery service model,
   `MetricsConfig.EnableDetailedObservability`). `invoke_test.py` uses
   `aws-sdk-sagemaker-runtime-http2[awscrt]>=0.11,<0.12`, as do the `python-*`
-  drivers (ported 2026-09-16). **Keep the `<0.12` cap**: 0.13.0 (current on
+  drivers (ported 2026-09-16) except `python-voice-agent`, which starts on
+  **0.13** (`>=0.13,<0.14`; the async client is imported from
+  `aws_sdk_sagemaker_runtime_http2.aio.client` and its config is resolved up front
+  with the CRT transport, whose default would be HTTP/1.1). **Keep the `<0.12` cap
+  on the others**: 0.13.0 (current on
   PyPI, checked 2026-11-18) removed `AsyncSageMakerRuntimeHTTP2Client`, so an
   uncapped PEP 723 script (`invoke_test.py`) or a re-lock imports nothing. Moving
   to the new API is a separate port of every driver. The 0.11 API: `AsyncSageMakerRuntimeHTTP2Client`,

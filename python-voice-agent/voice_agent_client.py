@@ -38,13 +38,14 @@ import sys
 import time
 from urllib.parse import quote
 
-from aws_sdk_sagemaker_runtime_http2.client import AsyncSageMakerRuntimeHTTP2Client
+from aws_sdk_sagemaker_runtime_http2.aio.client import AsyncSageMakerRuntimeHTTP2Client
+from aws_sdk_sagemaker_runtime_http2.aio.config import AsyncSageMakerRuntimeHTTP2Config
 from aws_sdk_sagemaker_runtime_http2.models import (
     InvokeEndpointWithBidirectionalStreamInput,
     RequestPayloadPart,
     RequestStreamEventPayloadPart,
 )
-from smithy_aws_core.identity import EnvironmentCredentialsResolver
+from smithy_aws_core.aio.identity import AsyncEnvironmentCredentialsResolver
 from smithy_http.aio.crt import AWSCRTHTTPClient
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -82,20 +83,22 @@ BIDI_PORT = 8443
 # ---------------------------------------------------------------------------
 
 
-def _bidi_client(endpoint_uri: str, region: str, transport=None) -> AsyncSageMakerRuntimeHTTP2Client:
-    """HTTP/2 SageMaker runtime client (aws-sdk-sagemaker-runtime-http2 >= 0.11).
+async def _bidi_client(endpoint_uri: str, region: str, transport=None) -> AsyncSageMakerRuntimeHTTP2Client:
+    """HTTP/2 SageMaker runtime client (aws-sdk-sagemaker-runtime-http2 0.13).
 
-    A client-level plugin keeps construction synchronous and pins the endpoint
-    URI (port 8443 is mandatory for the bidirectional stream), the region, the
+    The config is resolved up front with everything pinned: the endpoint URI
+    (port 8443 is mandatory for the bidirectional stream), the region, the
     credentials (read from the environment; see `ensure_env_credentials`) and
-    the AWS CRT HTTP/2 transport.
+    the AWS CRT HTTP/2 transport. The SDK's default transport is HTTP/1.1-only
+    and cannot carry the stream.
     """
-    def plugin(cfg):
-        cfg.endpoint_uri = endpoint_uri
-        cfg.region = region
-        cfg.aws_credentials_identity_resolver = EnvironmentCredentialsResolver()
-        cfg.transport = transport or AWSCRTHTTPClient()
-    return AsyncSageMakerRuntimeHTTP2Client(plugins=[plugin])
+    config = await AsyncSageMakerRuntimeHTTP2Config.resolve(
+        endpoint_uri=endpoint_uri,
+        region=region,
+        aws_credentials_identity_resolver=AsyncEnvironmentCredentialsResolver(),
+        transport=transport or AWSCRTHTTPClient(),
+    )
+    return AsyncSageMakerRuntimeHTTP2Client(config=config)
 
 
 def _event_payload(result) -> bytes | None:
@@ -125,10 +128,10 @@ def bidi_endpoint_uri(region: str, fips: bool = False) -> str:
     return f"https://{host}.sagemaker.{region}.amazonaws.com:{BIDI_PORT}"
 
 
-def make_client(region: str, fips: bool = False) -> AsyncSageMakerRuntimeHTTP2Client:
+async def make_client(region: str, fips: bool = False) -> AsyncSageMakerRuntimeHTTP2Client:
     """One HTTP/2 client. Port 8443 is mandatory: on the default 443 the call
     connects and then never answers, which looks exactly like a dead endpoint."""
-    return _bidi_client(bidi_endpoint_uri(region, fips), region)
+    return await _bidi_client(bidi_endpoint_uri(region, fips), region)
 
 
 class PerStreamClient:
@@ -145,7 +148,7 @@ class PerStreamClient:
         self._clients: list[AsyncSageMakerRuntimeHTTP2Client] = []
 
     async def invoke_endpoint_with_bidirectional_stream(self, stream_input):
-        client = make_client(self.region, self.fips)
+        client = await make_client(self.region, self.fips)
         self._clients.append(client)
         return await client.invoke_endpoint_with_bidirectional_stream(stream_input)
 
