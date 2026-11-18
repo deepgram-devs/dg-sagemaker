@@ -11,9 +11,9 @@ One endpoint serves three surfaces:
                       `invoke_endpoint`. `synthesize()`.
 
 Everything runs inside the container: speech-to-text, the LLM bundled in the
-container, and text-to-speech. The session's `Settings` point the agent's
-`think` step at that bundled LLM (`http://127.0.0.1:3081/v1/chat/completions`,
-model `phonellm`), so no request leaves the endpoint.
+container, and text-to-speech. The session's `Settings` select the bundled LLM
+the same way hosted Voice Agent selects a Deepgram LLM, by provider and model
+(`deepgram` / `phonellm`, no endpoint), so no request leaves the endpoint.
 
 Example: hold a short conversation and save what the agent said.
 
@@ -70,8 +70,7 @@ AGENT_PATH = "v1/agent/converse"
 LISTEN_PATH = "v2/listen"
 LISTEN_MODEL = "flux-general-multi"
 
-#: The LLM bundled in the container, reachable only from inside it.
-BUNDLED_LLM_URL = "http://127.0.0.1:3081/v1/chat/completions"
+#: The LLM bundled in the container, selected as a Deepgram think model.
 BUNDLED_LLM_MODEL = "phonellm"
 
 #: SageMaker's bidirectional-streaming port. NOT 443 — see `make_client`.
@@ -228,8 +227,7 @@ def agent_settings(*, voice: str = DEFAULT_VOICE, prompt: str = PROMPT,
     adds backchannels and earlier, more natural turn-taking.
     """
     think: dict = {
-        "provider": {"type": "open_ai", "model": BUNDLED_LLM_MODEL},
-        "endpoint": {"url": BUNDLED_LLM_URL, "headers": {}},
+        "provider": {"type": "deepgram", "model": BUNDLED_LLM_MODEL},
         "prompt": prompt,
     }
     if functions:

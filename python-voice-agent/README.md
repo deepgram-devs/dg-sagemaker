@@ -47,8 +47,7 @@ audio frames. This is what the scripts here send:
     "greeting": "Hi, thanks for calling. How can I help?",
     "listen": { "provider": { "type": "deepgram", "model": "flux-general-multi", "version": "v2" } },
     "think": {
-      "provider": { "type": "open_ai", "model": "phonellm" },
-      "endpoint": { "url": "http://127.0.0.1:3081/v1/chat/completions", "headers": {} },
+      "provider": { "type": "deepgram", "model": "phonellm" },
       "prompt": "You are a friendly restaurant host on a phone call. Keep every reply to one or two short spoken sentences."
     },
     "speak": { "provider": { "type": "deepgram", "version": "v2", "model": "flux-alexis-en" } }
@@ -56,8 +55,12 @@ audio frames. This is what the scripts here send:
 }
 ```
 
-- `think` points at the LLM bundled in the container. The address is local to the
-  container; nothing leaves the endpoint.
+- `think` selects the LLM bundled in the container, the same way you select a
+  Deepgram LLM on the hosted Voice Agent API: provider `deepgram` and a model
+  name, no endpoint. Nothing leaves the endpoint.
+- Custom `endpoint`s (think, functions, speak) must be public `https`/`wss` URLs,
+  as on the hosted API, and are only reachable if your endpoint's network
+  configuration allows egress.
 - Add `"think_live": {"provider": {"type": "deepgram"}}` under `agent` to turn on
   Conversational Mode (backchannels and more natural turn-taking).
 - Client-side functions go in `agent.think.functions`; the agent asks for them
