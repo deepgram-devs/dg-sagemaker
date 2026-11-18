@@ -177,7 +177,7 @@ scenarios pass in ~45 s / 13 s.
 Session-start rejections (HTTP 424 `Failed to establish WebSocket connection`,
 the container's 400 body is not forwarded) arrive immediately on client 0.5+
 but only after the input stream is closed on 0.4.x (same-endpoint A/B,
-2026-09-16) — one more reason the drivers pin >= 0.11. They are recorded on the connection's
+2026-09-16) — one more reason the drivers pin a current client (>= 0.13). They are recorded on the connection's
 `error_messages` rather than allowed to escape `asyncio.gather()`, so negative
 scenarios can tolerate them; the e2e runners also keep the driver's
 stdout/stderr when a scenario times out.
@@ -230,21 +230,23 @@ in `scripts/_common.py`):
 - **FIPS** — `--fips` per client, never `AWS_USE_FIPS_ENDPOINT` process-wide.
 - **Dependencies** — PEP 723 inline metadata (`# /// script`), run with `uv run`;
   no shared venv. Keep `boto3>=1.43.49` (marketplace-discovery service model,
-  `MetricsConfig.EnableDetailedObservability`). `invoke_test.py` uses
-  `aws-sdk-sagemaker-runtime-http2[awscrt]>=0.11,<0.12`, as do the `python-*`
-  drivers (ported 2026-09-16) except `python-voice-agent`, which starts on
-  **0.13** (`>=0.13,<0.14`; the async client is imported from
-  `aws_sdk_sagemaker_runtime_http2.aio.client` and its config is resolved up front
-  with the CRT transport, whose default would be HTTP/1.1). **Keep the `<0.12` cap
-  on the others**: 0.13.0 (current on
-  PyPI, checked 2026-11-18) removed `AsyncSageMakerRuntimeHTTP2Client`, so an
-  uncapped PEP 723 script (`invoke_test.py`) or a re-lock imports nothing. Moving
-  to the new API is a separate port of every driver. The 0.11 API: `AsyncSageMakerRuntimeHTTP2Client`,
-  config via `await ...Config.resolve(...)` or client `plugins=[...]` (the
-  drivers use a plugin so construction stays synchronous — see `_bidi_client`
-  in each), the `[awscrt]` extra for the HTTP/2 transport, and typed error
-  events (`ResponseStreamEventModelStreamError`) which `_event_payload` folds
-  into a Deepgram-style `Error` message.
+  `MetricsConfig.EnableDetailedObservability`). `invoke_test.py` and every `python-*`
+  driver use `aws-sdk-sagemaker-runtime-http2[awscrt]>=0.13,<0.14` (all ported
+  2026-11-18). The 0.13 API: the async client and config are imported from
+  `aws_sdk_sagemaker_runtime_http2.aio.client` / `.aio.config`; the config can
+  only be built with `await ...Config.resolve(...)` (direct construction raises
+  `ConfigError`), so the drivers' `_bidi_client` returns a small wrapper that
+  resolves it on first use and keeps every call site synchronous; the `[awscrt]`
+  extra gives the HTTP/2 transport (the default is aiohttp, which cannot carry
+  the bidirectional stream); credentials come from
+  `smithy_aws_core.aio.identity.AsyncEnvironmentCredentialsResolver`; typed error
+  events (`ResponseStreamEventModelStreamError`) are unchanged and
+  `_event_payload` folds them into a Deepgram-style `Error` message. The CRT
+  transport now builds its own event loop per client; `stt_wav_stress.py`
+  shares one across connections through the transport's private `_init`.
+  0.13.0 removed `AsyncSageMakerRuntimeHTTP2Client` from the package root, so a
+  driver still on the 0.11 imports fails at import: keep the `<0.14` cap and
+  port deliberately when 0.14 lands.
 - **Asynchronous endpoints** are temporarily not supported for Marketplace-hosted
   Deepgram: `deploy_endpoint.py` refuses `--async-bucket` and the references say
   to contact a Deepgram representative. Re-enable in `products.json`

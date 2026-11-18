@@ -5,6 +5,6 @@ description = "Deepgram Voice Agent on SageMaker (/v1/agent/converse) example cl
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "aws-sdk-sagemaker-runtime-http2[awscrt]>=0.13,<0.14",  # the async client lives in .aio from 0.13; other folders here still use the 0.11 API
+    "aws-sdk-sagemaker-runtime-http2[awscrt]>=0.13,<0.14",  # the async client lives in .aio from 0.13
     "boto3>=1.42.34",
 ]

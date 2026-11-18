@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["boto3>=1.43.49", "aws-sdk-sagemaker-runtime-http2[awscrt]>=0.11,<0.12"]
+# dependencies = ["boto3>=1.43.49", "aws-sdk-sagemaker-runtime-http2[awscrt]>=0.13,<0.14"]
 # ///
 """Send one real request to a Deepgram SageMaker endpoint and judge the answer.
 
@@ -249,7 +249,7 @@ def bidi_endpoint_uri(region: str, fips: bool) -> str:
 
 
 async def make_bidi_client(session, region: str, fips: bool):
-    """HTTP/2 SageMaker runtime client (aws-sdk-sagemaker-runtime-http2 >= 0.11).
+    """HTTP/2 SageMaker runtime client (aws-sdk-sagemaker-runtime-http2 0.13).
 
     The config must be built with `await ...Config.resolve(...)`. Credentials are
     the ones the boto3 chain resolved (profile / SSO / role), passed as static
@@ -257,8 +257,8 @@ async def make_bidi_client(session, region: str, fips: bool):
     is the AWS CRT client (the aiohttp default does not do the HTTP/2
     bidirectional stream). The endpoint URI carries the mandatory :8443.
     """
-    from aws_sdk_sagemaker_runtime_http2.client import AsyncSageMakerRuntimeHTTP2Client
-    from aws_sdk_sagemaker_runtime_http2.config import AsyncSageMakerRuntimeHTTP2Config
+    from aws_sdk_sagemaker_runtime_http2.aio.client import AsyncSageMakerRuntimeHTTP2Client
+    from aws_sdk_sagemaker_runtime_http2.aio.config import AsyncSageMakerRuntimeHTTP2Config
     from smithy_http.aio.crt import AWSCRTHTTPClient
 
     creds = session.get_credentials()

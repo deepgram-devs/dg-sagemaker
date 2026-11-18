@@ -16,39 +16,62 @@ import sys
 from queue import Queue
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError
-from aws_sdk_sagemaker_runtime_http2.client import AsyncSageMakerRuntimeHTTP2Client
+from aws_sdk_sagemaker_runtime_http2.aio.client import AsyncSageMakerRuntimeHTTP2Client
+from aws_sdk_sagemaker_runtime_http2.aio.config import AsyncSageMakerRuntimeHTTP2Config
 from aws_sdk_sagemaker_runtime_http2.models import (
     InvokeEndpointWithBidirectionalStreamInput,
     RequestStreamEventPayloadPart,
     RequestPayloadPart
 )
-from smithy_aws_core.identity import EnvironmentCredentialsResolver
+from smithy_aws_core.aio.identity import AsyncEnvironmentCredentialsResolver
 from smithy_http.aio.crt import AWSCRTHTTPClient
 
 
-def _bidi_client(endpoint_uri: str, region: str, transport=None) -> AsyncSageMakerRuntimeHTTP2Client:
-    """HTTP/2 SageMaker runtime client (aws-sdk-sagemaker-runtime-http2 >= 0.11).
+class _BidiClient:
+    """HTTP/2 SageMaker runtime client (aws-sdk-sagemaker-runtime-http2 0.13).
 
-    0.11 replaced the old `Config(...)`-constructed client with a config that
-    must be resolved asynchronously. A client-level plugin keeps construction
-    synchronous: the client resolves its defaults on first use and the plugin
-    then pins the endpoint URI (port 8443 is mandatory for the bidirectional
-    stream), the region, the credentials (read from the environment; callers
-    export them first) and the AWS CRT HTTP/2 transport (the default aiohttp
-    transport cannot carry the bidirectional stream).
+    From 0.13 the async client lives in `aws_sdk_sagemaker_runtime_http2.aio`, and
+    its config can only be built with `await ...Config.resolve(...)`. This wrapper
+    keeps construction synchronous and resolves the config on first use, pinning
+    the endpoint URI (port 8443 is mandatory for the bidirectional stream), the
+    region, the credentials (read from the environment; callers export them
+    first) and the AWS CRT HTTP/2 transport (the SDK's default transport cannot
+    carry the bidirectional stream).
     """
-    def plugin(cfg):
-        cfg.endpoint_uri = endpoint_uri
-        cfg.region = region
-        cfg.aws_credentials_identity_resolver = EnvironmentCredentialsResolver()
-        cfg.transport = transport or AWSCRTHTTPClient()
-    return AsyncSageMakerRuntimeHTTP2Client(plugins=[plugin])
+
+    def __init__(self, endpoint_uri: str, region: str, transport=None):
+        self._endpoint_uri = endpoint_uri
+        self._region = region
+        self._transport = transport
+        self._client: AsyncSageMakerRuntimeHTTP2Client | None = None
+
+    async def _get(self) -> AsyncSageMakerRuntimeHTTP2Client:
+        if self._client is None:
+            config = await AsyncSageMakerRuntimeHTTP2Config.resolve(
+                endpoint_uri=self._endpoint_uri,
+                region=self._region,
+                aws_credentials_identity_resolver=AsyncEnvironmentCredentialsResolver(),
+                transport=self._transport or AWSCRTHTTPClient(),
+            )
+            self._client = AsyncSageMakerRuntimeHTTP2Client(config=config)
+        return self._client
+
+    async def invoke_endpoint_with_bidirectional_stream(self, *args, **kwargs):
+        return await (await self._get()).invoke_endpoint_with_bidirectional_stream(*args, **kwargs)
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.close()
+
+
+def _bidi_client(endpoint_uri: str, region: str, transport=None) -> _BidiClient:
+    return _BidiClient(endpoint_uri, region, transport)
 
 
 def _event_payload(result) -> bytes | None:
     """Payload bytes of one response event, or None when there is nothing to handle.
 
-    0.11 delivers server-side stream failures as typed events
+    0.11+ delivers server-side stream failures as typed events
     (`ResponseStreamEventModelStreamError`, `...InternalStreamFailure`) whose
     `value` has no `bytes_`. Those are turned into a Deepgram-style
     `{"type": "Error", ...}` message so the existing handlers record them as

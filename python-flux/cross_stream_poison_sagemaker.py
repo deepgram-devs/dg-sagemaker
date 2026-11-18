@@ -29,11 +29,9 @@ from flux_stress import (
     DeepgramFluxConnection,
     DEFAULT_REGION,
     DEFAULT_MODEL,
+    _bidi_client,
+    _BidiClient,
 )
-from aws_sdk_sagemaker_runtime_http2.client import SageMakerRuntimeHTTP2Client
-from aws_sdk_sagemaker_runtime_http2.config import Config, HTTPAuthSchemeResolver
-from smithy_aws_core.identity import EnvironmentCredentialsResolver
-from smithy_aws_core.auth.sigv4 import SigV4AuthScheme
 import boto3
 import os
 
@@ -52,7 +50,7 @@ def load_wav(path):
     return raw, sample_rate, sample_width
 
 
-def build_client(region: str) -> SageMakerRuntimeHTTP2Client:
+def build_client(region: str) -> _BidiClient:
     session = boto3.Session(region_name=region)
     credentials = session.get_credentials()
     frozen = credentials.get_frozen_credentials()
@@ -61,14 +59,8 @@ def build_client(region: str) -> SageMakerRuntimeHTTP2Client:
     if frozen.token:
         os.environ["AWS_SESSION_TOKEN"] = frozen.token
 
-    config = Config(
-        endpoint_uri=f"https://runtime.sagemaker.{region}.amazonaws.com:8443",
-        region=region,
-        aws_credentials_identity_resolver=EnvironmentCredentialsResolver(),
-        auth_scheme_resolver=HTTPAuthSchemeResolver(),
-        auth_schemes={"aws.auth#sigv4": SigV4AuthScheme(service="sagemaker")},
-    )
-    return SageMakerRuntimeHTTP2Client(config=config)
+    # Same 0.13 client as flux_stress.py (SigV4 for SageMaker is the SDK default).
+    return _bidi_client(f"https://runtime.sagemaker.{region}.amazonaws.com:8443", region)
 
 
 class CapturingFluxConnection(DeepgramFluxConnection):

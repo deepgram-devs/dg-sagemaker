@@ -57,27 +57,29 @@ Temporarily not supported for Marketplace-hosted Deepgram. For files over 25 MB
 split the audio, or stream it faster than real time through a Streaming listing.
 If you have an asynchronous use case, reach out to a Deepgram representative.
 
-## Streaming — Python (`aws-sdk-sagemaker-runtime-http2` ≥ 0.11, `[awscrt]` extra)
+## Streaming — Python (`aws-sdk-sagemaker-runtime-http2` ≥ 0.13, `[awscrt]` extra)
 
 ```python
 import asyncio, boto3
-from aws_sdk_sagemaker_runtime_http2.client import AsyncSageMakerRuntimeHTTP2Client
-from aws_sdk_sagemaker_runtime_http2.config import AsyncSageMakerRuntimeHTTP2Config
+from aws_sdk_sagemaker_runtime_http2.aio.client import AsyncSageMakerRuntimeHTTP2Client
+from aws_sdk_sagemaker_runtime_http2.aio.config import AsyncSageMakerRuntimeHTTP2Config
 from aws_sdk_sagemaker_runtime_http2.models import (InvokeEndpointWithBidirectionalStreamInput,
                                                     RequestPayloadPart, RequestStreamEventPayloadPart,
                                                     ResponseStreamEventPayloadPart)
 from smithy_http.aio.crt import AWSCRTHTTPClient
 
 creds = boto3.Session().get_credentials().get_frozen_credentials()   # profile / SSO / role all work
-client = AsyncSageMakerRuntimeHTTP2Client(config=AsyncSageMakerRuntimeHTTP2Config(
-    region="us-east-2",
-    endpoint_uri="https://runtime.sagemaker.us-east-2.amazonaws.com:8443",   # :8443 is mandatory
-    aws_access_key_id=creds.access_key, aws_secret_access_key=creds.secret_key,
-    aws_session_token=creds.token,
-    transport=AWSCRTHTTPClient(),                                            # HTTP/2-capable transport
-))
 
 async def main():
+    # The config can only be built with `await ...Config.resolve(...)`.
+    config = await AsyncSageMakerRuntimeHTTP2Config.resolve(
+        region="us-east-2",
+        endpoint_uri="https://runtime.sagemaker.us-east-2.amazonaws.com:8443",   # :8443 is mandatory
+        aws_access_key_id=creds.access_key, aws_secret_access_key=creds.secret_key,
+        aws_session_token=creds.token,
+        transport=AWSCRTHTTPClient(),                                        # HTTP/2-capable transport
+    )
+    client = AsyncSageMakerRuntimeHTTP2Client(config=config)
     stream = await client.invoke_endpoint_with_bidirectional_stream(
         InvokeEndpointWithBidirectionalStreamInput(
             endpoint_name="my-deepgram-stt", model_invocation_path="v1/listen",
@@ -99,10 +101,13 @@ async def main():
 
 asyncio.run(main())
 ```
-Versions before 0.11 exposed `SageMakerRuntimeHTTP2Client` + `Config`; the
-repository's drivers (`python-stt`, `python-flux`, `python-tts`,
-`python-flux-tts`) show the 0.11 shape with a client plugin, which keeps
-construction synchronous. 0.6 and later surface a pre-upgrade rejection as a
+From 0.13 the async client and its config live in
+`aws_sdk_sagemaker_runtime_http2.aio`, and the config can only be built with
+`await ...Config.resolve(...)` (0.11 and 0.12 imported them from the package
+root; versions before 0.11 exposed `SageMakerRuntimeHTTP2Client` + `Config`).
+The repository's drivers (`python-stt`, `python-flux`, `python-tts`,
+`python-flux-tts`, `python-voice-agent`) all use 0.13; most wrap the client so
+it can be created synchronously and resolve the config on first use. 0.6 and later surface a pre-upgrade rejection as a
 424 `ModelError` immediately; 0.4.x only after the input stream is closed.
 
 Messages: Nova-3 → `Results` with `channel.alternatives[0].transcript`, `is_final`,
@@ -176,7 +181,7 @@ SageMaker Runtime interface endpoint".
   endpoint's CloudWatch log. A client that instead hangs with no error is
   either missing `:8443` in the URI, or is `aws-sdk-sagemaker-runtime-http2`
   0.4.x, which holds the 424 until the input stream is closed (0.6 and later
-  raise it immediately). Pin `>=0.11` and bound the open with a timeout.
+  raise it immediately). Pin `>=0.13` and bound the open with a timeout.
 - Streaming listing hit with `InvokeEndpoint` → 400 `No such model/language/tier`.
 - Latency metrics in CloudWatch are in **microseconds**; `ModelLatency` is not
   emitted for streaming — use `FirstChunkLatency` and `ConcurrentRequestsPerModel`.
