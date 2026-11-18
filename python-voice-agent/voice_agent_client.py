@@ -133,6 +133,27 @@ async def make_client(region: str, fips: bool = False) -> AsyncSageMakerRuntimeH
     return await _bidi_client(bidi_endpoint_uri(region, fips), region)
 
 
+def quiet_completed_stream_errors(loop: asyncio.AbstractEventLoop) -> None:
+    """Drop one known-benign transport error from the event loop's log.
+
+    When the server ends a stream first (a refused or invalid session), the
+    HTTP/2 transport's request-body task can still try to write end-of-stream and
+    logs "Task exception was never retrieved ... HTTP-stream has completed". The
+    session has already ended correctly; everything else is reported as usual.
+    """
+    default = loop.get_exception_handler()
+
+    def handler(lp, context):
+        exc = context.get("exception")
+        if isinstance(exc, RuntimeError) and "AWS_ERROR_HTTP_STREAM_HAS_COMPLETED" in str(exc):
+            return
+        if default is None:
+            lp.default_exception_handler(context)
+        else:
+            default(lp, context)
+    loop.set_exception_handler(handler)
+
+
 class PerStreamClient:
     """Opens each bidirectional stream on its OWN HTTP/2 client.
 
@@ -339,7 +360,11 @@ class AgentSession:
         self._changed.set()
 
     async def finish(self) -> None:
-        if self.stream is not None:
+        # Close our half only while the stream is still open. After the server
+        # has ended it, closing makes the HTTP/2 transport try to write
+        # end-of-stream to a completed stream, which it reports as an
+        # unretrieved "HTTP-stream has completed" task error.
+        if self.stream is not None and not self.closed:
             try:
                 await self.stream.input_stream.close()
             except Exception:  # noqa: BLE001
@@ -417,10 +442,18 @@ class AgentSession:
     def first_audio_after(self, since: float) -> float | None:
         return next((t for t, _ in self.audio if t >= since), None)
 
+    #: Events the server sends on its own schedule while the agent is idle. They
+    #: say nothing about whether the agent is still speaking, so they must not
+    #: reset the "agent went quiet" clock in `wait_reply`.
+    TELEMETRY_EVENTS = frozenset({"LatencyReport", "History", "Warning"})
+
     def last_activity(self) -> float:
-        """Time of the newest agent audio frame or agent-side event."""
+        """Time of the newest agent audio frame or agent-side event (telemetry
+        such as `LatencyReport` and `History` excluded)."""
         times = [t for t, _ in self.audio[-1:]]
-        times += [t for t, m in self.events[-1:]]
+        times += [next((t for t, m in reversed(self.events)
+                        if m.get("type") not in self.TELEMETRY_EVENTS), 0.0)]
+        times = [t for t in times if t]
         return max(times) if times else (self.opened_at or 0.0)
 
     async def wait_reply(self, since: float, timeout: float = 45.0, quiet_s: float = 1.5) -> bool:
@@ -586,7 +619,10 @@ def main() -> int:
                         format="%(asctime)s %(levelname)s %(message)s")
     print(f"Bidi URL:    {bidi_endpoint_uri(args.region, args.fips)}", file=sys.stderr)
     print(f"FIPS:        {'yes (--fips)' if args.fips else 'no'}", file=sys.stderr)
-    return asyncio.run(converse(args))
+    async def run():
+        quiet_completed_stream_errors(asyncio.get_running_loop())
+        return await converse(args)
+    return asyncio.run(run())
 
 
 if __name__ == "__main__":

@@ -71,6 +71,7 @@ from e2e.e2e_test_common import (  # noqa: E402
 from voice_agent_client import (  # noqa: E402
     AgentSession,
     PerStreamClient,
+    quiet_completed_stream_errors,
     agent_settings,
     bidi_endpoint_uri,
     ensure_env_credentials,
@@ -613,7 +614,10 @@ def main() -> int:
         return 0
     if not args.endpoint:
         p.error("endpoint is required unless --list")
-    return asyncio.run(main_async(args))
+    async def run():
+        quiet_completed_stream_errors(asyncio.get_running_loop())
+        return await main_async(args)
+    return asyncio.run(run())
 
 
 if __name__ == "__main__":

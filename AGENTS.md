@@ -75,7 +75,7 @@ timeout; the others fit easily in a single agent turn.
 | `python-tts/e2e/e2e_test_streaming.py` | ~1.5 min | multi_phrase_flush ~17 s | 10 scenarios. Safe inline. `speed_fast` (and batch `speed_duration`) SKIP outside en/es — Aura-2 speed is English and Spanish only per the public docs. |
 | `python-flux-tts/e2e/e2e_test_batch.py` | ~3.5 min | `speed`, `concurrent_5` | 16 scenarios, including one per output encoding (mp3/opus/flac/aac/mulaw/alaw/linear16 16 kHz). Safe inline. |
 | `python-flux-tts/e2e/e2e_test_streaming.py` | ~4.5 min | `speed` ~60 s, `long_turn` | 15 scenarios, including mulaw/alaw/linear16 16 kHz and a negative check that mp3/opus/aac/flac are refused on the WebSocket. `speed` renders the same text at the default rate and at `MAX_SPEED` and compares durations — `SPEED_SAMPLES` (3) paired renders, judged on the MEDIAN, so it costs SIX turns not two. Synthesis is stochastic and a single pair is not a verdict. `speed` SKIPS for a non-English `--voice` (Flux TTS voice controls are English-only per the public docs). Safe inline. |
-| `python-voice-agent/e2e/e2e_test_voice_agent.py` | **~8 min (ESTIMATE, not yet measured)** | `multi_turn_3`, `concurrent_4`, `keepalive_idle_20s` ≈ 30–60 s each | 15 scenarios; every agent scenario holds a real-time conversation, so wall-clock is set by speech, not compute. `function_call_client_side` SKIPS (not FAILS) when the LLM answers without calling the function. Safe as a backgrounded run; replace this estimate with a measured number. |
+| `python-voice-agent/e2e/e2e_test_voice_agent.py` | **~2.5 min** (150 s measured) | `multi_turn_3` ≈ 29 s, `keepalive_idle_20s` ≈ 27 s | 15 scenarios; every agent scenario holds a real-time conversation, so wall-clock is set by speech, not compute. `function_call_client_side` SKIPS (not FAILS) when the LLM answers without calling the function. Safe inline. |
 
 Wall-clocks measured against single-GPU (STT, Flux TTS) and multi-GPU (Aura-2
 TTS) SageMaker endpoints. Network and instance class shift the numbers, but the
@@ -302,6 +302,11 @@ against the live listings, `list_products.py`, `check_quota.py`, and
 `deploy_endpoint.py` planning with the default pool (no endpoint created). The
 endpoint itself was buyer-tested with the `python-flux-tts` e2e drivers, not
 through the kit's deploy/invoke scripts.
+
+2026-11-18, Voice Agent (`python-voice-agent`, SDK 0.13): the e2e suite passed
+15/15 in 150 s against a self-contained Voice Agent endpoint on ml.g7.24xlarge
+(Deepgram dev account; no Marketplace listing yet). Not exercised: `--fips`, the
+example client's `--wav` path, non-English voices.
 
 One listing can carry versions that need different hardware or voices. Model
 that as several `products.json` entries sharing a `product_id`, each with a
