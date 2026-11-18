@@ -75,6 +75,7 @@ timeout; the others fit easily in a single agent turn.
 | `python-tts/e2e/e2e_test_streaming.py` | ~1.5 min | multi_phrase_flush ~17 s | 10 scenarios. Safe inline. `speed_fast` (and batch `speed_duration`) SKIP outside en/es — Aura-2 speed is English and Spanish only per the public docs. |
 | `python-flux-tts/e2e/e2e_test_batch.py` | ~3.5 min | `speed`, `concurrent_5` | 16 scenarios, including one per output encoding (mp3/opus/flac/aac/mulaw/alaw/linear16 16 kHz). Safe inline. |
 | `python-flux-tts/e2e/e2e_test_streaming.py` | ~4.5 min | `speed` ~60 s, `long_turn` | 15 scenarios, including mulaw/alaw/linear16 16 kHz and a negative check that mp3/opus/aac/flac are refused on the WebSocket. `speed` renders the same text at the default rate and at `MAX_SPEED` and compares durations — `SPEED_SAMPLES` (3) paired renders, judged on the MEDIAN, so it costs SIX turns not two. Synthesis is stochastic and a single pair is not a verdict. `speed` SKIPS for a non-English `--voice` (Flux TTS voice controls are English-only per the public docs). Safe inline. |
+| `python-voice-agent/e2e/e2e_test_voice_agent.py` | **~8 min (ESTIMATE, not yet measured)** | `multi_turn_3`, `concurrent_4`, `keepalive_idle_20s` ≈ 30–60 s each | 15 scenarios; every agent scenario holds a real-time conversation, so wall-clock is set by speech, not compute. `function_call_client_side` SKIPS (not FAILS) when the LLM answers without calling the function. Safe as a backgrounded run; replace this estimate with a measured number. |
 
 Wall-clocks measured against single-GPU (STT, Flux TTS) and multi-GPU (Aura-2
 TTS) SageMaker endpoints. Network and instance class shift the numbers, but the
@@ -230,8 +231,11 @@ in `scripts/_common.py`):
 - **Dependencies** — PEP 723 inline metadata (`# /// script`), run with `uv run`;
   no shared venv. Keep `boto3>=1.43.49` (marketplace-discovery service model,
   `MetricsConfig.EnableDetailedObservability`). `invoke_test.py` uses
-  `aws-sdk-sagemaker-runtime-http2[awscrt]>=0.11`, as do the `python-*`
-  drivers (ported 2026-09-16). The 0.11 API: `AsyncSageMakerRuntimeHTTP2Client`,
+  `aws-sdk-sagemaker-runtime-http2[awscrt]>=0.11,<0.12`, as do the `python-*`
+  drivers (ported 2026-09-16). **Keep the `<0.12` cap**: 0.13.0 (current on
+  PyPI, checked 2026-11-18) removed `AsyncSageMakerRuntimeHTTP2Client`, so an
+  uncapped PEP 723 script (`invoke_test.py`) or a re-lock imports nothing. Moving
+  to the new API is a separate port of every driver. The 0.11 API: `AsyncSageMakerRuntimeHTTP2Client`,
   config via `await ...Config.resolve(...)` or client `plugins=[...]` (the
   drivers use a plugin so construction stays synchronous — see `_bidi_client`
   in each), the `[awscrt]` extra for the HTTP/2 transport, and typed error

@@ -143,3 +143,22 @@ End-to-end correctness gate ([`python-flux/e2e/`](python-flux/e2e/)) — Flux is
 
 - [`e2e/e2e_test_streaming.py`](python-flux/e2e/e2e_test_streaming.py) — drives `flux_stress.py file` through basic / concurrency / connection-param / multilingual / in-band-control / negative scenarios, scoring each connection's combined `EndOfTurn` transcript against the reference by WER
 
+
+---
+
+## Voice Agent (speech-to-speech)
+
+### Python
+
+See [python-voice-agent/README.md](python-voice-agent/README.md) for full setup and usage.
+The whole conversation loop (Flux speech-to-text, the LLM bundled in the container,
+Flux text-to-speech) runs inside one endpoint, which also serves standalone `/v2/listen`
+and `/v2/speak`. Needs a four-GPU instance and raised startup timeouts (see the README).
+
+Scripts:
+
+- [`voice_agent_client.py`](python-voice-agent/voice_agent_client.py) — holds a short conversation on `/v1/agent/converse` from a WAV file or a synthesized line, prints the conversation and saves the agent's audio; also the shared client (`AgentSession`, `transcribe()`, `synthesize()`)
+
+End-to-end correctness gate ([`python-voice-agent/e2e/`](python-voice-agent/e2e/)) — caller audio is synthesized with the endpoint's own text-to-speech, so one endpoint is all it needs:
+
+- [`e2e/e2e_test_voice_agent.py`](python-voice-agent/e2e/e2e_test_voice_agent.py) — greeting, single and multi-turn replies, Conversational Mode, barge-in, injected agent/user messages, `UpdatePrompt`, client-side function calls, `KeepAlive`, negative controls (malformed `Settings`, unknown query param), concurrency, and the standalone `/v2/listen` and `/v2/speak` surfaces
