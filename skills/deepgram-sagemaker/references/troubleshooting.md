@@ -52,7 +52,8 @@ aws sagemaker describe-endpoint --endpoint-name <name> --region <r> --query '{St
 | Someone asks for `InvokeEndpointAsync` / scale-to-zero | asynchronous endpoints are temporarily not supported for Marketplace-hosted Deepgram | use a real-time endpoint; reach out to a Deepgram representative for the async use case. |
 | Empty / garbage transcripts on Flux, endpoint healthy | running on `ml.g4dn` (T4) | redeploy on g5/g6/g6e/g7. |
 | Aura-2 fails to load models | single-GPU instance | `ml.*.12xlarge`. |
-| Voice Agent session refused at start (HTTP 424) | a query parameter on `v1/agent/converse` (it takes none), or a wrong path | empty `ModelQueryString`, path `v1/agent/converse`. |
+| Voice Agent session refused at start (HTTP 424) | a query parameter on `v1/agent/converse` (it takes none), or a wrong path | no query parameters, path `v1/agent/converse`. |
+| Voice Agent stream open fails with 400 `ValidationError` | `ModelQueryString` sent as an empty string | omit the field. |
 | Voice Agent returns `Error` right after `Settings` and closes | the Settings message is malformed, or names a provider, model or `endpoint` the endpoint cannot serve (only the bundled models; endpoint URLs must be public https/wss and are unreachable under network isolation) | start from the Settings in `voice-agent.md`; test with `invoke_test.py --product voice-agent --settings file.json`. |
 | Voice Agent greets, then never answers the caller | the client stopped sending audio after the caller finished; end-of-turn is detected from the audio | keep streaming frames (silence included) for the whole call. |
 | Voice Agent session left open keeps billing | sessions bill per second of connection time | close the stream when the call ends. |

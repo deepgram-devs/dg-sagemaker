@@ -112,8 +112,8 @@ The repository's drivers (`python-stt`, `python-flux`, `python-tts`,
 it can be created synchronously and resolve the config on first use. 0.6 and later surface a pre-upgrade rejection as a
 424 `ModelError` immediately; 0.4.x only after the input stream is closed.
 
-**Voice Agent:** same client, `model_invocation_path="v1/agent/converse"`,
-`model_query_string=""`. Send the `Settings` JSON with `send(…, "UTF8")`, then
+**Voice Agent:** same client, `model_invocation_path="v1/agent/converse"` and
+no `model_query_string` at all (an empty string is rejected with 400). Send the `Settings` JSON with `send(…, "UTF8")`, then
 caller audio frames with `send(…, "BINARY")` for the whole call, silence
 included. Agent audio comes back as binary frames and events as JSON text
 frames. Settings, events, functions and Conversational Mode: `voice-agent.md`.

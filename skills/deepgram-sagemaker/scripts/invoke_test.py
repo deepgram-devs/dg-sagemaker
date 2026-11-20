@@ -507,14 +507,16 @@ async def agent_once(session, name: str, region: str, fips: bool, prod: dict, se
     uri = bidi_endpoint_uri(region, fips)
     result["request"] = {"api": "InvokeEndpointWithBidirectionalStream", "endpoint_uri": uri,
                          "EndpointName": name, "ModelInvocationPath": prod["api_path"],
-                         "ModelQueryString": "", "first_message": "Settings (text frame), then binary audio frames",
+                         "ModelQueryString": "(omit: an empty string is rejected)", "first_message": "Settings (text frame), then binary audio frames",
                          "settings": settings}
     say(f"bidi stream  {uri}  path={prod['api_path']}")
 
     cli = await make_bidi_client(session, region, fips)
+    # No model_query_string at all: SageMaker rejects an EMPTY one with 400 ValidationError
+    # before the container sees the request.
     stream = await asyncio.wait_for(cli.invoke_endpoint_with_bidirectional_stream(
-        InvokeEndpointWithBidirectionalStreamInput(endpoint_name=name, model_invocation_path=prod["api_path"],
-                                                   model_query_string="")), timeout=30)
+        InvokeEndpointWithBidirectionalStreamInput(endpoint_name=name, model_invocation_path=prod["api_path"])),
+        timeout=30)
     output = await asyncio.wait_for(stream.await_output(), timeout=30)
     out_stream = output[1]
 

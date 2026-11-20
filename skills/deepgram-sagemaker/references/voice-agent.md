@@ -19,9 +19,15 @@ its own prompt, voice and functions.
 | `v2/listen` | bidirectional stream | standalone Flux speech-to-text (same as the `flux-multi` product) |
 | `v2/speak` | bidirectional stream or `InvokeEndpoint` | standalone Flux text-to-speech (same as the `flux-tts` product) |
 
-There is no synchronous agent call. `ModelQueryString` stays empty for
-`v1/agent/converse`: any query parameter the endpoint does not recognise refuses
-the session at start (HTTP 424 to the client).
+The LLM is only reachable through an agent session: there is no standalone
+LLM endpoint (`v1/think` returns 404), and Conversational Mode runs only
+inside `v1/agent/converse`. Requests to paths the endpoint does not serve
+return 404 or 405 and are not billed.
+
+There is no synchronous agent call. Leave `ModelQueryString` out entirely for
+`v1/agent/converse`: SageMaker rejects an empty string (HTTP 400
+`ValidationError`), and any query parameter the endpoint does not recognise
+refuses the session at start (HTTP 424 to the client).
 
 ## Deploying
 

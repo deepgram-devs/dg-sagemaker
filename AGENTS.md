@@ -305,6 +305,19 @@ against the live listings, `list_products.py`, `check_quota.py`, and
 endpoint itself was buyer-tested with the `python-flux-tts` e2e drivers, not
 through the kit's deploy/invoke scripts.
 
+2026-11-20, Voice Agent through the skill (`voice-agent`, `prod-t7qxk274fxoqm`,
+shared-dev as a subscribed buyer, Limited listing): `list_products.py`,
+`resolve_model_package_arn.py` and `check_quota.py` on the live listing;
+`deploy_endpoint.py --product voice-agent --instance-pools default` InService in
+about 12 minutes (1800 s download / 2400 s startup defaults, network isolation
+on); `invoke_test.py --product voice-agent` PASS three ways (built-in Settings,
+`--think-live`, `--settings` with a client-side function and Conversational
+Mode), run from a host with direct HTTP/2 access; `teardown_endpoint.py` clean.
+On the same endpoint `v1/think` and `v1/agent/chatty` returned 404 and the
+think-models listing 405, each metered at 0 units. An EMPTY `ModelQueryString`
+is rejected by SageMaker with 400 `ValidationError`: omit it for
+`v1/agent/converse`.
+
 2026-11-18, Voice Agent (`python-voice-agent`, SDK 0.13): the e2e suite passed
 15/15 in 150 s against a self-contained Voice Agent endpoint on ml.g7.24xlarge
 (Deepgram dev account; no Marketplace listing yet). Not exercised: `--fips`, the
