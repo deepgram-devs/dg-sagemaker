@@ -3,7 +3,7 @@
 Ask only the questions whose answers change the outcome. Most customers need
 three or four of these.
 
-## 1. Speech-to-text or text-to-speech?
+## 1. Speech-to-text, text-to-speech, or a whole voice agent?
 
 | Need | Family | Listings |
 |---|---|---|
@@ -11,6 +11,13 @@ three or four of these.
 | Voice agent / conversational turn-taking (needs end-of-turn detection, low latency) | **Flux** | `flux-en`, `flux-multi` |
 | Synthesize speech (IVR prompts, agent replies, narration) | **Aura-2** | `aura-2` |
 | Turn-based synthesis for voice agents on `/v2/speak` (interruptible turns) | **Flux TTS** | `flux-tts` (English), `flux-tts-multi` (other languages; same listing, separate version) |
+| A complete voice agent (listen, think with an LLM, speak) with **no outbound network calls**: the LLM runs inside the endpoint | **Voice Agent** | `voice-agent` (English voices). One endpoint also serves standalone Flux STT and Flux TTS. Configuration is per session: `voice-agent.md` |
+
+Choose `voice-agent` over Flux + Flux TTS + your own LLM when the whole
+conversation must stay in the account, or when one endpoint and one bill per
+connection-second is simpler than wiring three services. Choose the separate
+listings when the agent needs a specific third-party LLM or a tool that calls
+out over the network: the Voice Agent's endpoint has no outbound access.
 
 **Which languages?** SageMaker carries the generally available languages of the
 families above. Only these families are offered (no Nova-2, Base or other
@@ -99,6 +106,8 @@ present alternatives:
 - **Flux TTS** (English version, `flux-tts`): g6 or newer `*.2xlarge`; **no g5, no g4dn**.
 - **Flux TTS** (non-English version, `flux-tts-multi`): `*.4xlarge` in g7 / g7e /
   g6e only; the English version's `*.2xlarge` types are not supported.
+- **Voice Agent**: four GPUs on one host: `ml.g7.24xlarge` (recommended),
+  `ml.g7e.24xlarge`, `ml.g6e.12xlarge`. Quota for these is often 0 by default.
 
 **Deploy with a pool, not one type.** `--instance-pools default` uses the
 family's `default_pool` (recommended type first, then similar-capacity newer

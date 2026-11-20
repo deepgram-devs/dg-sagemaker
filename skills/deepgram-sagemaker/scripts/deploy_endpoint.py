@@ -131,9 +131,9 @@ def main() -> int:
     p.add_argument("--inference-ami-version", default=DEFAULT_INFERENCE_AMI,
                    help=f"host AMI (driver) pin; default {DEFAULT_INFERENCE_AMI}. 'none' = unpinned (not recommended)")
     p.add_argument("--model-download-timeout-s", type=int, default=None,
-                   help="ModelDataDownloadTimeoutInSeconds (default 600; 1800 for multilingual Nova-3)")
-    p.add_argument("--startup-timeout-s", type=int, default=900,
-                   help="ContainerStartupHealthCheckTimeoutInSeconds (default 900)")
+                   help="ModelDataDownloadTimeoutInSeconds (default 600; 1800 for multilingual Nova-3 and the Voice Agent)")
+    p.add_argument("--startup-timeout-s", type=int, default=None,
+                   help="ContainerStartupHealthCheckTimeoutInSeconds (default 900; 2400 for the Voice Agent)")
     p.add_argument("--async-bucket", default=None,
                    help="make this an ASYNCHRONOUS endpoint (TEMPORARILY NOT SUPPORTED for Marketplace-hosted "
                         "Deepgram — the script refuses unless --allow-unsupported-async is also given, for "
@@ -307,7 +307,13 @@ def main() -> int:
     # defaults derived from the product --------------------------------------
     download_timeout = args.model_download_timeout_s
     if download_timeout is None:
-        download_timeout = 1800 if (prod and prod["family"] == "nova-3" and prod["languages"] == "multilingual") else 600
+        download_timeout = 1800 if (prod and (prod["family"] == "voice-agent" or (
+            prod["family"] == "nova-3" and prod["languages"] == "multilingual"))) else 600
+    # The Voice Agent loads speech-to-text, text-to-speech and an LLM before /ping
+    # passes (about 6 minutes on ml.g7.24xlarge, longer on slower hosts).
+    startup_timeout = args.startup_timeout_s
+    if startup_timeout is None:
+        startup_timeout = 2400 if (prod and prod["family"] == "voice-agent") else 900
     if download_timeout < 600:
         say("note: ModelDataDownloadTimeoutInSeconds below 600 is likely to time out on Deepgram bundles")
 
@@ -336,7 +342,7 @@ def main() -> int:
     variant: dict = {
         "VariantName": "AllTraffic", "ModelName": name, "InitialInstanceCount": args.instance_count,
         "ModelDataDownloadTimeoutInSeconds": download_timeout,
-        "ContainerStartupHealthCheckTimeoutInSeconds": args.startup_timeout_s,
+        "ContainerStartupHealthCheckTimeoutInSeconds": startup_timeout,
         "RoutingConfig": {"RoutingStrategy": args.routing_strategy},
     }
     if len(types) == 1:
@@ -370,7 +376,7 @@ def main() -> int:
         "routing_strategy": args.routing_strategy,
         "single_type_reason": args.single_type_reason, "quota_notes": quota_notes,
         "inference_ami_version": ami, "network_isolation": True,
-        "model_download_timeout_s": download_timeout, "startup_timeout_s": args.startup_timeout_s,
+        "model_download_timeout_s": download_timeout, "startup_timeout_s": startup_timeout,
         "detailed_observability": detailed, "environment": environment,
         "async_output": config_kwargs.get("AsyncInferenceConfig", {}).get("OutputConfig"),
         "control_plane": sm.meta.endpoint_url,

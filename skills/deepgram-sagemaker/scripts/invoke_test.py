@@ -15,6 +15,10 @@ it can be copied into the customer's application.
                STT: sends the sample WAV as linear16 chunks, expects final transcripts
                (v1/listen: Results with is_final; v2/listen Flux: TurnInfo EndOfTurn).
                TTS: sends Speak + Flush, expects non-silent audio bytes.
+               Voice Agent (v1/agent/converse): sends Settings, expects Welcome,
+               SettingsApplied and an audible greeting, then plays 6 s of the sample WAV
+               as the caller and expects a user transcript, an assistant reply and
+               audible reply audio. --settings FILE tests your own Settings message.
     sync       InvokeEndpoint with the Deepgram query in CustomAttributes
                ("v1/listen?model=nova-3&language=en"). Real-time endpoints only.
     async      InvokeEndpointAsync against an EXISTING asynchronous endpoint (diagnosis only —
@@ -25,6 +29,8 @@ it can be copied into the customer's application.
   uv run invoke_test.py my-endpoint --region us-east-2 --product nova-3-mono-batch --mode sync
   uv run invoke_test.py my-endpoint --region us-east-2 --product aura-2 --text "Hello from SageMaker"
   uv run invoke_test.py my-endpoint --region us-east-2 --product nova-3-mono-streaming --language es --audio my.wav
+  uv run invoke_test.py my-endpoint --region us-east-2 --product voice-agent
+  uv run invoke_test.py my-endpoint --region us-east-2 --product voice-agent --settings my-settings.json
 
 Exit 0 pass · 1 the request was answered but the result is not acceptable (or a
 known mismatch was detected) · 2 AWS/transport error.
@@ -435,6 +441,211 @@ async def stream_once(session, name: str, region: str, fips: bool, prod: dict, p
 
 
 # ---------------------------------------------------------------------------
+# Voice Agent (/v1/agent/converse)
+# ---------------------------------------------------------------------------
+
+AGENT_SETTINGS = {
+    "type": "Settings",
+    "audio": {
+        "input": {"encoding": "linear16", "sample_rate": 16000},
+        "output": {"encoding": "linear16", "sample_rate": TTS_SAMPLE_RATE, "container": "none"},
+    },
+    "agent": {
+        "greeting": "Hello, this is the Deepgram Voice Agent on Amazon SageMaker.",
+        "listen": {"provider": {"type": "deepgram", "model": "flux-general-multi", "version": "v2"}},
+        "think": {
+            "provider": {"type": "deepgram", "model": "phonellm-mini-alpha-2-fp8"},
+            "prompt": "You are a friendly voice assistant on a phone call. Reply in one short spoken sentence.",
+        },
+        "speak": {"provider": {"type": "deepgram", "version": "v2", "model": "flux-alexis-en"}},
+    },
+}
+CALLER_SECONDS = 6.0
+FRAME_MS = 20
+# Events that describe the session rather than the conversation; logged, not judged.
+AGENT_TELEMETRY = {"History", "LatencyReport"}
+
+
+def resample_linear(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
+    """Mono 16-bit PCM, linear interpolation. Good enough for a speech test clip."""
+    import array
+    a = array.array("h"); a.frombytes(pcm)
+    if src_rate == dst_rate or not a:
+        return pcm
+    n = int(len(a) * dst_rate / src_rate)
+    out = array.array("h", [0]) * n
+    step = src_rate / dst_rate
+    for i in range(n):
+        x = i * step; j = int(x); f = x - j
+        b = a[j + 1] if j + 1 < len(a) else a[j]
+        out[i] = int(a[j] + (b - a[j]) * f)
+    return out.tobytes()
+
+
+def caller_clip(audio_path: str, rate: int) -> bytes:
+    pcm, sr, ch = read_wav(audio_path)
+    if ch > 1:  # keep the first channel
+        import array
+        a = array.array("h"); a.frombytes(pcm)
+        pcm = a[::ch].tobytes()
+    pcm = pcm[: int(sr * CALLER_SECONDS) * 2]
+    return resample_linear(pcm, sr, rate)
+
+
+async def agent_once(session, name: str, region: str, fips: bool, prod: dict, settings: dict,
+                     audio_path: str, result: dict, max_seconds: float) -> int:
+    from aws_sdk_sagemaker_runtime_http2.models import (InvokeEndpointWithBidirectionalStreamInput,
+                                                        RequestPayloadPart, RequestStreamEventPayloadPart,
+                                                        ResponseStreamEventPayloadPart)
+
+    inp = (settings.get("audio") or {}).get("input") or {}
+    out = (settings.get("audio") or {}).get("output") or {}
+    if inp.get("encoding", "linear16") != "linear16":
+        fail_error("the test streams linear16 caller audio; set audio.input.encoding to linear16 in --settings")
+    in_rate = int(inp.get("sample_rate") or 16000)
+    out_linear = out.get("encoding", "linear16") == "linear16"
+    uri = bidi_endpoint_uri(region, fips)
+    result["request"] = {"api": "InvokeEndpointWithBidirectionalStream", "endpoint_uri": uri,
+                         "EndpointName": name, "ModelInvocationPath": prod["api_path"],
+                         "ModelQueryString": "", "first_message": "Settings (text frame), then binary audio frames",
+                         "settings": settings}
+    say(f"bidi stream  {uri}  path={prod['api_path']}")
+
+    cli = await make_bidi_client(session, region, fips)
+    stream = await asyncio.wait_for(cli.invoke_endpoint_with_bidirectional_stream(
+        InvokeEndpointWithBidirectionalStreamInput(endpoint_name=name, model_invocation_path=prod["api_path"],
+                                                   model_query_string="")), timeout=30)
+    output = await asyncio.wait_for(stream.await_output(), timeout=30)
+    out_stream = output[1]
+
+    async def send(b: bytes, data_type: str):
+        await stream.input_stream.send(RequestStreamEventPayloadPart(
+            value=RequestPayloadPart(bytes_=b, data_type=data_type)))
+
+    events: list[tuple[float, str]] = []
+    texts: list[tuple[str, str]] = []
+    errors: list[str] = []
+    audio: list[tuple[float, bytes]] = []
+    done = asyncio.Event()
+    changed = asyncio.Event()
+
+    async def reader():
+        try:
+            while True:
+                r = await out_stream.receive()
+                if r is None:
+                    break
+                if not isinstance(r, ResponseStreamEventPayloadPart):
+                    val = getattr(r, "value", None)
+                    errors.append(f"{type(r).__name__}: {getattr(val, 'message', None) or val!r}"[:300])
+                    say(f"  ! {errors[-1]}")
+                    changed.set()
+                    continue
+                if not (r.value and r.value.bytes_):
+                    continue
+                raw = r.value.bytes_
+                try:
+                    m = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    audio.append((time.monotonic(), raw))
+                    continue
+                t = m.get("type", "?")
+                events.append((time.monotonic(), t))
+                if t == "ConversationText":
+                    texts.append((m.get("role", "?"), m.get("content", "")))
+                    say(f"  {m.get('role', '?'):9} {m.get('content', '')[:160]}")
+                elif t in ("Error", "Warning"):
+                    if t == "Error":
+                        errors.append(json.dumps(m)[:300])
+                    say(f"  ! {json.dumps(m)[:300]}")
+                elif t not in AGENT_TELEMETRY:
+                    say(f"  · {t}")
+                changed.set()
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if "Input stream broken" not in msg and "closed" not in msg.lower() and "has completed" not in msg:
+                errors.append(f"{type(e).__name__}: {msg[:300]}")
+        finally:
+            done.set(); changed.set()
+
+    def count(t: str) -> int:
+        return sum(1 for _, x in events if x == t)
+
+    silence = b"\x00\x00" * int(in_rate * FRAME_MS / 1000)
+
+    async def feed_until(pred, timeout: float) -> bool:
+        """Stream silence (a live call never stops sending audio) until pred() or timeout."""
+        end = time.monotonic() + timeout
+        while not pred() and not done.is_set() and time.monotonic() < end:
+            await send(silence, "BINARY")
+            await asyncio.sleep(FRAME_MS / 1000)
+        return pred()
+
+    rtask = asyncio.create_task(reader())
+    greeting_ok = reply_ok = False
+    latency = None
+    try:
+        await send(json.dumps(settings).encode(), "UTF8")
+        if not await feed_until(lambda: count("SettingsApplied") > 0 or errors, 30) or errors:
+            result["diagnosis"] = ("The agent did not apply the Settings message. "
+                                   + (f"It returned: {errors[0]}" if errors else "No SettingsApplied within 30 s."))
+        else:
+            if settings.get("agent", {}).get("greeting"):
+                await feed_until(lambda: count("AgentAudioDone") >= 1 or errors, 30)
+                g_audio = b"".join(b for _, b in audio)
+                greeting_ok = len(g_audio) > 0 and (not out_linear or audio_looks_real(g_audio))
+                say(f"greeting audio: {len(g_audio)} bytes → {'ok' if greeting_ok else 'EMPTY/SILENT'}")
+            else:
+                greeting_ok = True
+            mark_audio = len(audio)
+            done_before = count("AgentAudioDone")
+            clip = caller_clip(audio_path, in_rate)
+            say(f"caller: {len(clip) / (in_rate * 2):.1f} s of {os.path.basename(audio_path)} at {in_rate} Hz, then silence")
+            step = int(in_rate * FRAME_MS / 1000) * 2
+            for i in range(0, len(clip), step):
+                await send(clip[i:i + step], "BINARY")
+                await asyncio.sleep(FRAME_MS / 1000)
+            speech_end = time.monotonic()
+            await feed_until(lambda: count("AgentAudioDone") > done_before or errors, max_seconds)
+            reply = audio[mark_audio:]
+            r_audio = b"".join(b for _, b in reply)
+            if reply:
+                latency = round(reply[0][0] - speech_end, 3)
+            heard = [c for role, c in texts if role == "user" and c.strip()]
+            answered = [c for role, c in texts if role == "assistant" and c.strip()]
+            reply_audible = len(r_audio) > 0 and (not out_linear or audio_looks_real(r_audio))
+            reply_ok = bool(heard) and bool(answered) and reply_audible and not errors
+            result.update(user_transcript=heard, assistant_reply=answered[-1:] if answered else [],
+                          reply_audio_bytes=len(r_audio), first_reply_audio_after_caller_audio_s=latency)
+            if not reply_ok:
+                result["diagnosis"] = (
+                    f"Errors: {errors[0]}" if errors else
+                    "No user transcript: the agent did not hear the caller (check audio.input matches the audio "
+                    "sent, and that the client keeps streaming audio)." if not heard else
+                    "No assistant reply: the LLM did not answer (check agent.think in Settings)." if not answered else
+                    "The reply had no audible audio (check agent.speak and audio.output).")
+        await send(json.dumps({"type": "KeepAlive"}).encode(), "UTF8")
+    finally:
+        try:
+            await stream.input_stream.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await asyncio.wait_for(done.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            rtask.cancel()
+        try:
+            await cli.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    result.update(events=sorted({t for _, t in events}), errors=errors, greeting_ok=greeting_ok)
+    if "diagnosis" in result:
+        say(f"→ {result['diagnosis']}")
+    return EXIT_OK if (greeting_ok and reply_ok) else EXIT_NEGATIVE
+
+
+# ---------------------------------------------------------------------------
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
@@ -452,6 +663,11 @@ def main() -> int:
     p.add_argument("--pace", type=float, default=2.0, help="streaming send speed relative to real time (default 2x)")
     p.add_argument("--wait-minutes", type=int, default=10, help="async: how long to wait for the result")
     p.add_argument("--timeout-s", type=float, default=90, help="streaming: max seconds to wait for the server")
+    p.add_argument("--settings", default=None, metavar="FILE",
+                   help="voice-agent: a Settings JSON file to test instead of the built-in one "
+                        "(see references/voice-agent.md)")
+    p.add_argument("--think-live", action="store_true",
+                   help="voice-agent: turn on Conversational Mode in the built-in Settings")
     args = p.parse_args()
 
     catalog = load_catalog()
@@ -517,6 +733,30 @@ def main() -> int:
 
     result: dict = {"endpoint_name": args.name, "region": region, "product": prod["slug"], "mode": mode,
                     "fips": args.fips}
+    agent_settings = None
+    if prod["service"] == "agent":
+        if mode != "streaming":
+            fail_error("the Voice Agent is streaming only (/v1/agent/converse over port 8443); "
+                       "use --mode streaming, or test /v2/speak with --product flux-tts on the same endpoint")
+        if args.settings:
+            try:
+                agent_settings = json.load(open(args.settings))
+            except (OSError, json.JSONDecodeError) as e:
+                fail_error(f"cannot read --settings {args.settings}", e)
+            if agent_settings.get("type") != "Settings":
+                fail_error("--settings must be a Settings message ({\"type\": \"Settings\", ...})")
+        else:
+            agent_settings = json.loads(json.dumps(AGENT_SETTINGS))
+            if args.model:
+                agent_settings["agent"]["speak"]["provider"]["model"] = args.model
+            if args.text != DEFAULT_TEXT:
+                agent_settings["agent"]["greeting"] = args.text
+        if args.think_live:
+            agent_settings.setdefault("agent", {})["think_live"] = {"provider": {"type": "deepgram", "version": "v1"}}
+        extra = {k: v for k, v in params.items() if k != "model"}
+        if extra:
+            say(f"note: /v1/agent/converse takes no query parameters (an unknown one refuses the session); "
+                f"ignoring {extra}")
     if mode == "sync":
         rc = run_sync(rt, args.name, prod, params, args.audio, args.text, result)
     elif mode == "async":
@@ -526,9 +766,13 @@ def main() -> int:
                        args.wait_minutes, result)
     else:
         try:
-            rc = asyncio.run(asyncio.wait_for(
-                stream_once(session, args.name, region, args.fips, prod, params, args.audio, args.text, result,
-                            args.pace, args.timeout_s), timeout=args.timeout_s + 60))
+            if agent_settings is not None:
+                coro = agent_once(session, args.name, region, args.fips, prod, agent_settings, args.audio,
+                                  result, args.timeout_s)
+            else:
+                coro = stream_once(session, args.name, region, args.fips, prod, params, args.audio, args.text,
+                                   result, args.pace, args.timeout_s)
+            rc = asyncio.run(asyncio.wait_for(coro, timeout=args.timeout_s + 120))
         except asyncio.TimeoutError:
             result["diagnosis"] = ("The stream never opened or never answered within the timeout. Check the endpoint is "
                                    "InService and the URI includes :8443; a rejected request surfaces as a 424 within "

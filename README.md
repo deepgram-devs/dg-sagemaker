@@ -21,7 +21,7 @@ npx skills add deepgram-devs/dg-sagemaker          # any SKILL.md-aware agent
 ```
 
 Then ask the agent, e.g. "set up Deepgram Nova-3 streaming on SageMaker in
-us-east-2". It needs AWS credentials for the target account and
+us-east-2" or "deploy the Deepgram Voice Agent on SageMaker and test it". It needs AWS credentials for the target account and
 [`uv`](https://docs.astral.sh/uv/) (each script declares its own dependencies).
 The agent confirms with you before anything that costs money (subscribing,
 creating an endpoint) or deletes resources, recommends an instance *pool*
@@ -41,13 +41,14 @@ The scripts also work on their own (`uv run skills/deepgram-sagemaker/scripts/<s
 - [`create_execution_role.py`](skills/deepgram-sagemaker/scripts/create_execution_role.py) — idempotent SageMaker execution role (+ S3 grant for async)
 - [`deploy_endpoint.py`](skills/deepgram-sagemaker/scripts/deploy_endpoint.py) — Model + EndpointConfig + Endpoint with the required settings baked in; waits and diagnoses failures
 - [`endpoint_status.py`](skills/deepgram-sagemaker/scripts/endpoint_status.py) — status, variant, log tail, named cause + next step
-- [`invoke_test.py`](skills/deepgram-sagemaker/scripts/invoke_test.py) — one real streaming or synchronous request with the right path and params; explains the classic 400s
+- [`invoke_test.py`](skills/deepgram-sagemaker/scripts/invoke_test.py) — one real streaming or synchronous request with the right path and params; explains the classic 400s; for the Voice Agent, a greeting plus one caller turn, with your own `Settings` via `--settings`
 - [`configure_autoscaling.py`](skills/deepgram-sagemaker/scripts/configure_autoscaling.py) — target-tracking auto-scaling for real-time endpoints
 - [`update_endpoint.py`](skills/deepgram-sagemaker/scripts/update_endpoint.py) — in-place update (instance type/count, AMI, env, model version) with rollback
 - [`teardown_endpoint.py`](skills/deepgram-sagemaker/scripts/teardown_endpoint.py) — delete endpoint + config + model, then verify nothing is left
 
 Reference material the skill reads lives in [`skills/deepgram-sagemaker/references/`](skills/deepgram-sagemaker/references/)
-(`products.json` is the machine-readable catalog of listings, API paths, required parameters and instance types).
+(`products.json` is the machine-readable catalog of listings, API paths, required parameters and instance types;
+[`voice-agent.md`](skills/deepgram-sagemaker/references/voice-agent.md) covers configuring the Voice Agent: `Settings`, the bundled LLM, Conversational Mode, client-side functions, billing).
 
 ## Speech-to-Text (STT)
 

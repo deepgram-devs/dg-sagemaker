@@ -1,5 +1,5 @@
 {
-  "catalog_version": "2026-10-30.1",
+  "catalog_version": "2026-11-20.1",
   "seller_profile_id": "6efa21f9-9a33-4cae-ba44-756436fa71dd",
   "marketplace_search_url": "https://aws.amazon.com/marketplace/search/results?searchTerms=deepgram&CREATOR=6efa21f9-9a33-4cae-ba44-756436fa71dd&FULFILLMENT_OPTION_TYPE=SAGEMAKER_MODEL&filters=CREATOR%2CFULFILLMENT_OPTION_TYPE",
   "manage_subscriptions_url": "https://us-east-1.console.aws.amazon.com/marketplace/subscriptions",
@@ -13,7 +13,9 @@
     "field_demonstration_program": "https://docs.aws.amazon.com/marketplace/latest/userguide/field-demonstration-program.html",
     "stt_languages": "https://developers.deepgram.com/docs/models-languages-overview",
     "tts_languages": "https://developers.deepgram.com/docs/tts-models-languages-overview",
-    "contact": "https://deepgram.com/contact-us"
+    "contact": "https://deepgram.com/contact-us",
+    "voice_agent": "https://developers.deepgram.com/docs/voice-agent",
+    "voice_agent_settings": "https://developers.deepgram.com/docs/configure-voice-agent"
   },
   "inference_ami_version": "al2023-ami-sagemaker-inference-gpu-4-1",
   "instance_profiles": {
@@ -118,6 +120,29 @@
         "ml.g4dn.*"
       ],
       "note": "Single GPU on a *.4xlarge host: g7 (recommended), g7e or g6e. g6, g5 and g4dn are not supported."
+    },
+    "voice-agent-4-gpu": {
+      "recommended": "ml.g7.24xlarge",
+      "default_pool": [
+        "ml.g7.24xlarge",
+        "ml.g7e.24xlarge",
+        "ml.g6e.12xlarge"
+      ],
+      "supported": [
+        "ml.g7.24xlarge",
+        "ml.g7e.24xlarge",
+        "ml.g6e.12xlarge"
+      ],
+      "unsupported": [
+        "ml.*.2xlarge",
+        "ml.*.4xlarge",
+        "ml.*.8xlarge",
+        "ml.g5.*",
+        "ml.g4dn.*",
+        "ml.g6.*",
+        "any type with fewer than 4 GPUs"
+      ],
+      "note": "Four GPUs on one host: speech-to-text, text-to-speech and the bundled LLM each get their own. On g7 and g7e the four-GPU size is 24xlarge; on g6e it is 12xlarge."
     }
   },
   "products": [
@@ -378,6 +403,44 @@
         "/v2/speak rejects unknown query parameters with 400 rather than ignoring them.",
         "`speed` is not a flux-tts parameter."
       ]
+    },
+    {
+      "slug": "voice-agent",
+      "aliases": [
+        "voice-agent-api",
+        "agent"
+      ],
+      "product_id": "prod-t7qxk274fxoqm",
+      "listing_name": "Deepgram Voice Agent API (speech-to-speech bi-directional audio)",
+      "service": "agent",
+      "family": "voice-agent",
+      "languages": "per-version",
+      "language_coverage": "The agent speaks the Flux TTS English voices listed at docs.tts_languages; it listens with Flux multilingual speech-to-text.",
+      "transport": "streaming",
+      "invocation_modes": [
+        "streaming"
+      ],
+      "api_path": "v1/agent/converse",
+      "base_params": {},
+      "language_param": "none: the session's Settings message chooses the speech-to-text model, the LLM and the voice",
+      "default_voice": "flux-alexis-en",
+      "also_serves": {
+        "v2/listen": "standalone Flux speech-to-text (streaming)",
+        "v2/speak": "standalone Flux text-to-speech (streaming or synchronous)"
+      },
+      "instance_profile": "voice-agent-4-gpu",
+      "use_when": "A complete voice agent inside your own AWS account: speech-to-text, the LLM and text-to-speech all run in the endpoint with no outbound network calls. The client streams caller audio to /v1/agent/converse and receives agent audio and JSON events. Configure each session with a Settings message; see references/voice-agent.md.",
+      "gotchas": [
+        "Bidirectional streaming only (port 8443): there is no synchronous /v1/agent/converse.",
+        "The first message on every session must be Settings; everything (prompt, voice, LLM, Conversational Mode, functions) is per session, not per endpoint.",
+        "think.provider is type deepgram with model phonellm-mini-alpha-2-fp8 (the LLM in the container). There is no endpoint to set and no API key.",
+        "Custom endpoint URLs in Settings must be public https/wss and only work if the endpoint has outbound network access; Marketplace endpoints run with network isolation by default, so they will not be reachable.",
+        "Keep sending audio for the whole call, silence included: end-of-turn is detected from the audio, and a client that stops sending never ends its turn.",
+        "Unknown query parameters on /v1/agent/converse refuse the session at start (HTTP 424 to the client).",
+        "Startup loads three models and the LLM: allow 1800 s for model download and 2400 s for the startup health check (deploy_endpoint.py sets both for this product).",
+        "Billed per second of connection time; the agent's own speech-to-text and text-to-speech are included. Standalone /v2/listen and /v2/speak requests on the same endpoint are billed like Flux STT and Flux TTS."
+      ],
+      "version_language": "en"
     }
   ],
   "instance_pools_guidance": "Deploy with the ordered default_pool (five types, SageMaker's maximum, or every supported type when fewer exist) rather than one type: SageMaker falls back to the next type when one has no capacity, and GPU capacity shortages were the dominant deploy failure in testing. Priority 1 = recommended type; then same-or-newer generation with similar per-instance capacity; then older generations (often the most available). deploy_endpoint.py drops types the package version does not list and types with zero or exhausted quota. See references/instance-pools.md.",

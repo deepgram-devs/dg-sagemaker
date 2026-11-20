@@ -22,7 +22,8 @@ goes `Failed` with `Request to service failed` and no container log, typically
    supported). They work, at higher latency per stream.
 4. **Never include a type the product does not support**: `g4dn` for Flux,
    `g5`/`g4dn` for Flux TTS, anything but g7/g7e/g6e `*.4xlarge` for the
-   non-English Flux TTS version, any single-GPU type for Aura-2. `deploy_endpoint.py`
+   non-English Flux TTS version, any single-GPU type for Aura-2, anything
+   with fewer than four GPUs for the Voice Agent. `deploy_endpoint.py`
    checks the pool against the package's `SupportedRealtimeInferenceInstanceTypes`.
 5. **Use all five slots.** SageMaker allows at most five pool members; the
    `default_pool` for each family fills them (or lists every supported type when
@@ -49,6 +50,7 @@ Default pools per product family (`default_pool` in `products.json`):
 | Aura-2 | `ml.g6.12xlarge`, `ml.g6e.12xlarge`, `ml.g5.12xlarge`, `ml.g4dn.12xlarge`, `ml.g7.12xlarge` |
 | Flux TTS | `ml.g6e.2xlarge`, `ml.g6.2xlarge`, `ml.g7.2xlarge`, `ml.g7e.2xlarge` (all four supported types) |
 | Flux TTS, non-English version (`flux-tts-multi`) | `ml.g7.4xlarge`, `ml.g7e.4xlarge`, `ml.g6e.4xlarge` (all three supported types) |
+| Voice Agent | `ml.g7.24xlarge`, `ml.g7e.24xlarge`, `ml.g6e.12xlarge` (all three supported types; four GPUs each) |
 
 Nova-3 and Aura-2 support six types; the fifth slot goes to `g7` over `g7e`
 because `g7e` quota is the one most often still at 0. Swap it in if your

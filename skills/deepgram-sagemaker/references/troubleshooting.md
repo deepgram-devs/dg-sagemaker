@@ -27,6 +27,7 @@ aws sagemaker describe-endpoint --endpoint-name <name> --region <r> --query '{St
 | `Caller is not subscribed to the marketplace offering` | `not_subscribed` | `subscribe.py`, or accept the private offer in each linked account (or License Manager grant). |
 | `Environment variable map cannot be specified when using a ModelPackage…` | `env_not_allowed` | Listing not enabled for overrides. Remove `--env`; ask Deepgram support. |
 | Instance type "not supported" | `instance_type_not_supported` | Use a type from `resolve_model_package_arn.py`'s supported list (g7/g7e only in recent versions). |
+| Voice Agent Failed on the ping health check after ~5 minutes, log shows models still loading | startup budget too short (`ContainerStartupHealthCheckTimeoutInSeconds` left at SageMaker's default, e.g. an endpoint built by hand) | Redeploy with `deploy_endpoint.py --product voice-agent` (sets 2400 s and a 1800 s download), or set both by hand. |
 | Log group exists, container died | `container_failed` | Read the log tail; send endpoint name, region and the lines to Deepgram support. |
 
 `/ping` returning 503 while the endpoint is `Creating` is normal (models loading);
@@ -51,6 +52,10 @@ aws sagemaker describe-endpoint --endpoint-name <name> --region <r> --query '{St
 | Someone asks for `InvokeEndpointAsync` / scale-to-zero | asynchronous endpoints are temporarily not supported for Marketplace-hosted Deepgram | use a real-time endpoint; reach out to a Deepgram representative for the async use case. |
 | Empty / garbage transcripts on Flux, endpoint healthy | running on `ml.g4dn` (T4) | redeploy on g5/g6/g6e/g7. |
 | Aura-2 fails to load models | single-GPU instance | `ml.*.12xlarge`. |
+| Voice Agent session refused at start (HTTP 424) | a query parameter on `v1/agent/converse` (it takes none), or a wrong path | empty `ModelQueryString`, path `v1/agent/converse`. |
+| Voice Agent returns `Error` right after `Settings` and closes | the Settings message is malformed, or names a provider, model or `endpoint` the endpoint cannot serve (only the bundled models; endpoint URLs must be public https/wss and are unreachable under network isolation) | start from the Settings in `voice-agent.md`; test with `invoke_test.py --product voice-agent --settings file.json`. |
+| Voice Agent greets, then never answers the caller | the client stopped sending audio after the caller finished; end-of-turn is detected from the audio | keep streaming frames (silence included) for the whole call. |
+| Voice Agent session left open keeps billing | sessions bill per second of connection time | close the stream when the call ends. |
 
 ## Health and recovery
 

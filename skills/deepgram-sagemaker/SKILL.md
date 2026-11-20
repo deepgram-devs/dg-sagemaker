@@ -1,6 +1,6 @@
 ---
 name: deepgram-sagemaker
-description: Set up and run Deepgram speech models (Nova-3 and Flux speech-to-text, Aura-2 and Flux text-to-speech) on Amazon SageMaker through AWS Marketplace. Use when someone wants to subscribe to a Deepgram SageMaker listing (public, private or AWS Marketplace Field Demonstration Program offer), find a model package ARN, pick an instance type, create or update or delete a SageMaker endpoint for Deepgram, test that a Deepgram endpoint works, configure auto-scaling, or debug a Deepgram endpoint that failed to start or returns 400s. Requires AWS credentials for the customer's account and the `uv` tool.
+description: Set up and run Deepgram speech models (Nova-3 and Flux speech-to-text, Aura-2 and Flux text-to-speech) and the self-contained Deepgram Voice Agent on Amazon SageMaker through AWS Marketplace. Use when someone wants to subscribe to a Deepgram SageMaker listing (public, private or AWS Marketplace Field Demonstration Program offer), find a model package ARN, pick an instance type, create or update or delete a SageMaker endpoint for Deepgram, test that a Deepgram endpoint works, configure the Voice Agent's Settings (prompt, voice, LLM, Conversational Mode, functions), configure auto-scaling, or debug a Deepgram endpoint that failed to start or returns 400s. Requires AWS credentials for the customer's account and the `uv` tool.
 ---
 
 # Deepgram on Amazon SageMaker
@@ -45,8 +45,9 @@ script covers; the scripts encode the settings the container requires.
 Fix anything DENIED using `references/iam.md`. A MISSING role is fine (Phase 3 creates it).
 
 ### Phase 1 — Use case → product and mode
-Ask only what `references/decision-guide.md` needs: speech-to-text or
-text-to-speech; live audio vs pre-recorded files; one known language vs
+Ask only what `references/decision-guide.md` needs: speech-to-text,
+text-to-speech, or a whole voice agent (`voice-agent`: listen, LLM and speak in
+one endpoint, no outbound network calls); live audio vs pre-recorded files; one known language vs
 mixed/unknown; turn-taking voice agent (Flux) vs transcription (Nova-3);
 region; rough concurrency; compliance needs (FIPS); whether traffic must stay
 off the public internet or latency is critical (→ interface VPC endpoint, see
@@ -67,7 +68,7 @@ request another monolingual language on SageMaker, or when a model's coverage
 does not match those pages.
 
 ### Phase 2 — Subscribe
-`uv run scripts/list_products.py --product <slug> --region <region>`
+`uv run scripts/list_products.py --product <slug>` (Marketplace is global; no region)
 If exit 1 (not subscribed): `uv run scripts/subscribe.py <slug>` shows the offer
 terms and creates a quote (no charge). Read the terms to the person, then
 `… --accept`. Private offer → `--offer-id`. Already-used free trial →
@@ -105,19 +106,25 @@ edited order. `deploy_endpoint.py` drops zero-quota rungs itself and says so.
 `uv run scripts/deploy_endpoint.py --region <region> --product <slug> --model-package-arn <arn> --execution-role-arn <role> --instance-pools default|A,B,C [--env K=V] --yes --json`
 (`--instance-type T --single-type-reason "…"` when one type is intended.)
 Routing is least-outstanding-requests by default (`--routing-strategy RANDOM` to opt out).
-Waits for InService (10–20 min typical). On failure it prints FailureReason,
+Waits for InService (10–20 min typical; the Voice Agent loads three models and
+an LLM, and the script gives it 1800 s to download and 2400 s to start). On failure it prints FailureReason,
 whether a container log group exists, the log tail and a named cause with the
 next step; follow `references/troubleshooting.md`. A Failed endpoint does not
 bill but should be removed with `teardown_endpoint.py`.
 
 ### Phase 5 — Validate
 `uv run scripts/invoke_test.py <endpoint> --region <region> --product <slug> [--mode streaming|sync] [--language xx] [--text "…"] --json`
-PASS means a real transcript (or real audio) came back. The `request` field in
+PASS means a real transcript (or real audio) came back. For `voice-agent` it
+means the session applied the Settings, greeted audibly, heard a caller turn
+and spoke an audible reply; `--settings file.json` tests the customer's own
+Settings and `--think-live` turns on Conversational Mode. Configuring the agent
+(prompt, voice, the bundled LLM, functions, keep-alive, billing) is in
+`references/voice-agent.md`: walk the person through it here. The `request` field in
 the JSON is the exact shape (path, query, headers, port 8443 for streaming) to
 copy into the customer's application; `references/invoke.md` has code per
 language. For load and accuracy gates, point to the full drivers in this
 repository (`python-stt/e2e`, `python-flux/e2e`, `python-tts/e2e`,
-`python-flux-tts/e2e`).
+`python-flux-tts/e2e`, `python-voice-agent/e2e`).
 
 ### Phase 6 — Operate (optional)
 - Auto-scaling (real-time only): `uv run scripts/configure_autoscaling.py <endpoint> --region <region> --min 1 --max N --target T --yes`
@@ -145,6 +152,11 @@ and costs nothing while idle.
   `aws-sdk-sagemaker-runtime-http2` 0.4.x, which holds the 424 until the input
   stream closes; upgrade to 0.13.
 - Stuck in Creating → download timeout too low for a large bundle, or capacity.
+- Voice Agent: Failed on the ping health check while still loading → the
+  startup timeout was too short (deploy it with `deploy_endpoint.py`); greets but
+  never answers → the client stopped sending audio; `Error` right after Settings
+  → a provider, model or endpoint the bundled agent cannot serve
+  (`references/voice-agent.md`).
 - Container never starts, log group absent → provisioning (quota/capacity/AMI),
   not the image. Try `--instance-pools` or another region.
 Full table: `references/troubleshooting.md`.
@@ -152,5 +164,5 @@ Full table: `references/troubleshooting.md`.
 ## Files
 - `scripts/` — one script per step; `--help` on each.
 - `references/products.json` — the listings, families, API paths, required params, instance types.
-- `references/decision-guide.md`, `iam.md`, `deploy-parameters.md`, `instance-pools.md`, `invoke.md`, `troubleshooting.md`, `field-demonstration-program.md`.
+- `references/decision-guide.md`, `iam.md`, `deploy-parameters.md`, `instance-pools.md`, `invoke.md`, `voice-agent.md`, `troubleshooting.md`, `field-demonstration-program.md`.
 - `assets/spacewalk.wav` — 26 s English sample used by `invoke_test.py`.

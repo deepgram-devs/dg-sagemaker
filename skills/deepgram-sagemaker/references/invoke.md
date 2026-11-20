@@ -9,7 +9,8 @@ alongside the request**, because SageMaker only knows `/invocations`.
 | Synchronous | `InvokeEndpoint` | `CustomAttributes="v1/listen?model=nova-3&language=en"` (header `X-Amzn-SageMaker-Custom-Attributes`) | real-time |
 | Asynchronous | `InvokeEndpointAsync` | — | **temporarily not supported** for Marketplace-hosted Deepgram; contact a Deepgram representative |
 
-Paths: `v1/listen` (Nova-3), `v2/listen` (Flux), `v1/speak` (Aura-2), `v2/speak` (Flux TTS).
+Paths: `v1/listen` (Nova-3), `v2/listen` (Flux), `v1/speak` (Aura-2), `v2/speak` (Flux TTS),
+`v1/agent/converse` (Voice Agent; streaming only).
 Without a path the container returns 404.
 
 ## Required parameters per product
@@ -22,6 +23,7 @@ Without a path the container returns 404.
 | Flux multilingual | `v2/listen` | `model=flux-general-multi`, `encoding`, `sample_rate` | — | `language=` |
 | Aura-2 | `v1/speak` | `model=aura-2-<voice>-<lang>` (e.g. `aura-2-thalia-en`) | `encoding=linear16&sample_rate=24000` recommended | — |
 | Flux TTS | `v2/speak` | `model=flux-<voice>-<lang>` (e.g. `flux-alexis-en`) | `encoding=linear16&sample_rate=24000` | `speed`, unknown params (400) |
+| Voice Agent | `v1/agent/converse` | no query parameters; the first message is `Settings` (`voice-agent.md`) | — | any query parameter (session refused, 424) |
 
 Other Deepgram features (`smart_format`, `punctuate`, `diarize`, `keyterm`,
 `redact`, …) are ordinary query parameters. Unknown parameters are rejected with
@@ -110,6 +112,12 @@ The repository's drivers (`python-stt`, `python-flux`, `python-tts`,
 it can be created synchronously and resolve the config on first use. 0.6 and later surface a pre-upgrade rejection as a
 424 `ModelError` immediately; 0.4.x only after the input stream is closed.
 
+**Voice Agent:** same client, `model_invocation_path="v1/agent/converse"`,
+`model_query_string=""`. Send the `Settings` JSON with `send(…, "UTF8")`, then
+caller audio frames with `send(…, "BINARY")` for the whole call, silence
+included. Agent audio comes back as binary frames and events as JSON text
+frames. Settings, events, functions and Conversational Mode: `voice-agent.md`.
+
 Messages: Nova-3 → `Results` with `channel.alternatives[0].transcript`, `is_final`,
 `speech_final`. Flux → `TurnInfo` with `event` ∈ `Update | StartOfTurn |
 EagerEndOfTurn | EndOfTurn` and `transcript`. TTS → binary audio frames plus
@@ -123,7 +131,7 @@ Java: the Deepgram Java SDK's SageMaker transport (`com.deepgram:deepgram-sagema
 `.apiKey("unused")` — auth is SigV4.
 
 Full runnable clients (file, microphone, load, e2e gates) live in this repository:
-`python-stt/`, `python-flux/`, `python-tts/`, `python-flux-tts/`, `js-stt/`, `java/`.
+`python-stt/`, `python-flux/`, `python-tts/`, `python-flux-tts/`, `python-voice-agent/`, `js-stt/`, `java/`.
 
 ## FIPS
 
